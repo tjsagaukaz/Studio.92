@@ -1,0 +1,56 @@
+version = 1
+
+[workspace]
+session_dir = ".studio92/sessions"
+worktree_dir = ".studio92/worktrees"
+branch_prefix = "codex/"
+
+[product]
+platforms = ["ios", "macos"]
+language = "swift"
+ui_framework = "swiftui"
+prefer_native_frameworks = true
+use_storyboards = false
+
+[models]
+plan = "claude-sonnet-4.6"
+review = "claude-sonnet-4.6"
+full_send = "gpt-5.4"
+subagent = "gpt-5.4-mini"
+standards_research = "gpt-5.4-mini"
+release_compliance = "gpt-5.4"
+escalation = "claude-opus-4.6"
+
+[research]
+apple_docs_first = true
+require_live_web_for_shipping = true
+preferred_domains = [
+  "developer.apple.com",
+  "apple.com",
+  "openai.com",
+  "developers.openai.com",
+]
+
+[signing]
+# Fill these before a real App Store Connect push.
+team_id = ""
+automatic_signing = false
+
+[shipping]
+bundle_id_prefix = "com.studio92"
+default_testflight_lane = "beta"
+require_privacy_manifest = true
+require_entitlements_review = true
+require_app_icons = true
+require_screenshots = true
+require_support_url = true
+require_privacy_url = true
+require_export_compliance_review = true
+require_release_notes = true
+
+[verification]
+commands = [
+  "swift build",
+  "swift test",
+  "xcodebuild -project CommandCenter/CommandCenter.xcodeproj -scheme CommandCenter -configuration Debug -sdk macosx build CODE_SIGNING_ALLOWED=NO",
+]

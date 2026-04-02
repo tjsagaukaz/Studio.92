@@ -1,0 +1,10 @@
+Prefer SwiftUI for new Apple apps.
+Prefer native Apple frameworks and system components before adding third-party layers.
+Do not generate Storyboards, custom design kernels, or proprietary UI frameworks unless the task explicitly asks for them.
+Use live web research whenever the task depends on the current date, Apple SDK behavior, App Store policy, privacy manifests, entitlements, or TestFlight and App Store Connect requirements.
+Search Apple documentation first, then widen to the general web only when Apple sources are incomplete.
+Use Git-backed worktrees for long-running audits, large refactors, release prep, and background jobs.
+Keep background jobs isolated to `.studio92/worktrees/*`.
+Treat `.studio92/ship.toml` as the canonical shipping configuration.
+Run real verification before claiming success: `swift build`, `swift test`, `xcodebuild`, simulator checks, or Fastlane as appropriate.
+Call out blockers early and clearly: signing, bundle IDs, provisioning, privacy manifests, screenshots, metadata, failing builds, or review-guideline risk.

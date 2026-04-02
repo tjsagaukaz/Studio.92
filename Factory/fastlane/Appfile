@@ -1,0 +1,6 @@
+# Appfile
+# Studio.92 — Fastlane app identity configuration.
+
+app_identifier ENV["STUDIO92_BUNDLE_ID"] || "com.studio92.app"
+apple_id        ENV["APPLE_ID"]          || raise("APPLE_ID not set")
+team_id         ENV["STUDIO92_TEAM_ID"]  || raise("STUDIO92_TEAM_ID not set")

@@ -1,0 +1,20 @@
+# Snapfile
+# Studio.92 — App Store screenshot configuration.
+
+devices([
+  "iPhone 16 Pro Max",
+  "iPhone SE (3rd generation)",
+  "iPad Pro 13-inch (M4)"
+])
+
+languages(["en-US"])
+
+scheme("Studio92UITests")
+
+output_directory("../output/screenshots")
+clear_previous_screenshots(true)
+concurrent_simulators(true)
+
+# Launch arguments passed to the app during snapshot runs.
+# Use these to put the app in a deterministic demo state.
+launch_arguments(["-UITestMode YES", "-AnimationsDisabled YES"])

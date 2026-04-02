@@ -1,0 +1,292 @@
+# Fastfile
+# Studio.92 — Shipping Pipeline
+# Two lanes: `agent_verify` (test gate) and `dark_ship` (sign + distribute).
+#
+# SETUP:
+#   gem install fastlane
+#   cd Factory && fastlane agent_verify
+#
+# ENV VARS REQUIRED:
+#   STUDIO92_WORKSPACE       path to .xcworkspace (or .xcodeproj)
+#   STUDIO92_SCHEME          Xcode scheme name
+#   STUDIO92_BUNDLE_ID       app bundle identifier
+#   STUDIO92_TEAM_ID         Apple Developer Team ID
+#   STUDIO92_PROFILE_UUID    UUID of the distribution provisioning profile
+#   STUDIO92_YUBIKEY_CERT    Common name of the distribution cert on the YubiKey
+#                            e.g. "iPhone Distribution: Studio92 Ltd (XXXXXXXXXX)"
+
+default_platform(:ios)
+
+# ─────────────────────────────────────────────────────────────────
+# Shared helpers
+# ─────────────────────────────────────────────────────────────────
+
+WORKSPACE      = ENV["STUDIO92_WORKSPACE"]      || "../App/Studio92.xcworkspace"
+SCHEME         = ENV["STUDIO92_SCHEME"]         || "Studio92"
+BUNDLE_ID      = ENV["STUDIO92_BUNDLE_ID"]      || "com.studio92.app"
+TEAM_ID        = ENV["STUDIO92_TEAM_ID"]        || raise("STUDIO92_TEAM_ID not set")
+PROFILE_UUID   = ENV["STUDIO92_PROFILE_UUID"]   || raise("STUDIO92_PROFILE_UUID not set")
+YUBIKEY_CERT   = ENV["STUDIO92_YUBIKEY_CERT"]   || raise("STUDIO92_YUBIKEY_CERT not set")
+OUTPUT_DIR     = File.expand_path("../output")
+NOTES_DIR      = File.expand_path("../notes")
+ERRORS_FILE    = File.join(OUTPUT_DIR, "compiler_errors.txt")
+BUILD_LOG_FILE = File.join(OUTPUT_DIR, "build.log")
+
+platform :ios do
+
+  # ───────────────────────────────────────────────────────────────
+  # LANE 1: agent_verify
+  # Run unit tests and capture compiler errors for agent feedback.
+  # ───────────────────────────────────────────────────────────────
+
+  desc "Compile and run the full test suite. On failure, writes compiler errors to file for agent re-queuing."
+  lane :agent_verify do
+
+    FileUtils.mkdir_p(OUTPUT_DIR)
+
+    UI.message "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    UI.message "  Studio.92 — Agent Verify"
+    UI.message "  Scheme: #{SCHEME}"
+    UI.message "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    begin
+      scan(
+        workspace:          WORKSPACE,
+        scheme:             SCHEME,
+        clean:              true,
+        output_directory:   OUTPUT_DIR,
+        output_files:       "test_results.xml",
+        result_bundle:      true,
+        xcargs:             "-parallelizeTargets",
+        buildlog_path:      OUTPUT_DIR,
+        fail_build:         false       # we handle failure ourselves below
+      )
+
+      # scan sets lane_context[:TESTS_FAILED] if any tests failed
+      if lane_context[:TESTS_FAILED]
+        extract_compiler_errors
+        UI.important "⚠️  Tests failed. Compiler errors written to #{ERRORS_FILE}"
+        UI.important "    Re-run the builder with:"
+        UI.important "    swift run council --full-send \"Fix the current build failures. Errors: $(cat #{ERRORS_FILE})\""
+        UI.user_error!("agent_verify: tests failed — see #{ERRORS_FILE}")
+      else
+        UI.success "✅  All tests passed."
+      end
+
+    rescue => e
+      # Build itself failed (compile errors), not just test failures.
+      extract_compiler_errors
+      UI.error "Build failed: #{e.message}"
+      UI.important "Compiler errors written to: #{ERRORS_FILE}"
+      UI.important "Re-run the builder with:"
+      UI.important "  swift run council --full-send \"Fix the current build failures. Errors: $(cat #{ERRORS_FILE})\""
+      raise e
+    end
+  end
+
+  # ───────────────────────────────────────────────────────────────
+  # LANE 2: dark_ship
+  # Screenshots → compile .ipa → YubiKey sign → TestFlight upload.
+  # ───────────────────────────────────────────────────────────────
+
+  desc "Full shipping lane: snapshots + gym (YubiKey signing) + TestFlight upload."
+  lane :dark_ship do |options|
+
+    FileUtils.mkdir_p(OUTPUT_DIR)
+    build_start = Time.now
+
+    UI.message ""
+    UI.message "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    UI.message "  Studio.92 — Dark Ship Initiated"
+    UI.message "  #{Time.now.strftime('%Y-%m-%d %H:%M:%S')}"
+    UI.message "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    UI.message ""
+
+    # ── Step 1: Increment build number ────────────────────────────
+    increment_build_number(
+      build_number: options[:build_number] || latest_testflight_build_number + 1
+    ) unless options[:skip_version_bump]
+
+    current_build  = get_build_number
+    current_version = get_version_number
+
+    UI.message "  Version: #{current_version} (#{current_build})"
+    UI.message ""
+
+    # ── Step 2: App Store screenshots ─────────────────────────────
+    unless options[:skip_snapshots]
+      UI.message "📸 Capturing App Store screenshots…"
+      snapshot(
+        workspace:           WORKSPACE,
+        scheme:              "#{SCHEME}UITests",
+        output_directory:    File.join(OUTPUT_DIR, "screenshots"),
+        clear_previous_screenshots: true,
+        devices:             [
+          "iPhone 16 Pro Max",
+          "iPhone SE (3rd generation)",
+          "iPad Pro 13-inch (M4)"
+        ],
+        languages:           ["en-US"],
+        concurrent_simulators: true,
+        stop_after_first_error: false
+      )
+      UI.success "✅ Screenshots saved to #{OUTPUT_DIR}/screenshots/"
+    end
+
+    # ── Step 3: YubiKey pre-flight check ──────────────────────────
+    yubikey_preflight
+
+    # ── Step 4: Build .ipa (manual signing, YubiKey distribution cert) ─
+    UI.message ""
+    UI.message "🔨 Building .ipa with manual code signing…"
+    UI.message "   Certificate: #{YUBIKEY_CERT}"
+    UI.message ""
+
+    ipa_path = gym(
+      workspace:           WORKSPACE,
+      scheme:              SCHEME,
+      configuration:       "Release",
+      clean:               true,
+      output_directory:    OUTPUT_DIR,
+      output_name:         "Studio92_#{current_version}_#{current_build}.ipa",
+      buildlog_path:       OUTPUT_DIR,
+
+      # ── Manual code signing ──────────────────────────────────────
+      export_method:       "app-store",
+      export_xcargs:       "-allowProvisioningUpdates",
+      export_options: {
+        method:                  "app-store",
+        teamID:                  TEAM_ID,
+        signingStyle:            "manual",
+        signingCertificate:      YUBIKEY_CERT,
+        provisioningProfiles:    { BUNDLE_ID => PROFILE_UUID },
+        stripSwiftSymbols:       true,
+        uploadBitcode:           false,
+        compileBitcode:          false
+      },
+
+      # ── codesign will prompt the YubiKey for PIN via the system UI ─
+      # The export process will pause here while the OS requests
+      # the YubiKey PIN. Do not unplug the key until you see success.
+      xcargs: [
+        "CODE_SIGN_STYLE=Manual",
+        "CODE_SIGN_IDENTITY=#{YUBIKEY_CERT}",
+        "PROVISIONING_PROFILE_SPECIFIER=#{PROFILE_UUID}",
+        "DEVELOPMENT_TEAM=#{TEAM_ID}"
+      ].join(" ")
+    )
+
+    build_duration = Time.now - build_start
+
+    UI.message ""
+    UI.success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    UI.success "  ✅ IPA SIGNED AND SEALED"
+    UI.success "  Path:     #{ipa_path}"
+    UI.success "  Duration: #{format_duration(build_duration)}"
+    UI.success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    UI.message ""
+
+    # Persist build duration for MorningNote.
+    File.write(File.join(OUTPUT_DIR, "build_duration.txt"),
+               "Finished in #{(build_duration / 60).floor} minutes and #{(build_duration % 60).round} seconds\n")
+
+    # ── Step 5: Upload to TestFlight ──────────────────────────────
+    unless options[:skip_upload]
+      UI.message "🚀 Uploading to TestFlight…"
+      upload_to_testflight(
+        ipa:              ipa_path,
+        skip_waiting_for_build_processing: true,
+        changelog:        load_changelog
+      )
+      UI.success "✅ Uploaded to TestFlight."
+    end
+
+    # ── Step 6: Slack / Webhook notification ─────────────────────
+    if ENV["SLACK_WEBHOOK_URL"]
+      slack(
+        message:          "Studio.92 #{current_version} (#{current_build}) shipped to TestFlight 🚀",
+        success:          true,
+        payload:          { "IPA" => File.basename(ipa_path),
+                            "Build Time" => format_duration(build_duration) },
+        default_payloads: [:git_branch, :last_git_commit_hash]
+      )
+    end
+
+    # Return IPA path for wrapper scripts and terminal tooling.
+    ipa_path
+  end
+
+  # ───────────────────────────────────────────────────────────────
+  # Private helpers
+  # ───────────────────────────────────────────────────────────────
+
+  private_lane :yubikey_preflight do
+    UI.message ""
+    UI.message "┌─────────────────────────────────────────────┐"
+    UI.message "│                                             │"
+    UI.message "│   🔑  WAITING FOR YUBIKEY TO SIGN...        │"
+    UI.message "│                                             │"
+    UI.message "│   Insert your YubiKey (or confirm it is    │"
+    UI.message "│   already inserted) and ensure the         │"
+    UI.message "│   distribution certificate is loaded.      │"
+    UI.message "│                                             │"
+    UI.message "│   Certificate expected:                     │"
+    UI.message "│   #{YUBIKEY_CERT.ljust(43)} │"
+    UI.message "│                                             │"
+    UI.message "└─────────────────────────────────────────────┘"
+    UI.message ""
+
+    # Verify the certificate is actually present in a keychain.
+    result = sh("security find-certificate -c '#{YUBIKEY_CERT}' 2>&1 || true").strip
+    unless result.include?("alis") || result.include?(YUBIKEY_CERT)
+      UI.user_error!(
+        "YubiKey certificate '#{YUBIKEY_CERT}' not found in any keychain.\n" \
+        "Insert your YubiKey and ensure the distribution cert is installed.\n" \
+        "Run: security find-certificate -a -c '#{YUBIKEY_CERT}'"
+      )
+    end
+
+    UI.success "  ✅ Certificate located. Proceeding with build."
+    UI.message ""
+  end
+
+  private_lane :extract_compiler_errors do
+    # Parse xcodebuild output for error lines and write them to a clean
+    # text file the orchestrator can feed back to the Architect agent.
+    log_files = Dir.glob("#{OUTPUT_DIR}/*.log")
+    errors    = []
+
+    log_files.each do |log|
+      File.readlines(log).each do |line|
+        if line =~ /error:/ && line !~ /ld: warning/
+          errors << line.strip
+        end
+      end
+    end
+
+    if errors.empty?
+      File.write(ERRORS_FILE, "No compiler errors found in build logs.\n")
+    else
+      File.write(ERRORS_FILE, errors.uniq.join("\n") + "\n")
+    end
+
+    UI.message "#{errors.uniq.length} unique error(s) written to #{ERRORS_FILE}"
+  end
+
+  private_lane :load_changelog do
+    # Load the most recent MorningNote as changelog if it exists.
+    notes = Dir.glob("#{NOTES_DIR}/MorningNote_*.md").sort.last
+    return "Autonomous factory build — see deliberation log." unless notes
+
+    lines = File.readlines(notes)
+    rationale = lines.find { |l| l.start_with?("> **Rationale:**") }
+    rationale ? rationale.gsub(/^> \*\*Rationale:\*\* /, "").strip : "Autonomous build."
+  end
+
+  def format_duration(seconds)
+    m = (seconds / 60).floor
+    s = (seconds % 60).round
+    m > 0 ? "#{m}m #{s}s" : "#{s}s"
+  end
+
+end
