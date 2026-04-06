@@ -20,6 +20,13 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_26.3.app || sudo xcode-select -s /Applications/Xcode.app
 
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
       - name: Resolve dependencies
         run: swift package resolve
 
@@ -27,16 +34,32 @@ jobs:
         run: swift build
 
       - name: Run tests
-        run: swift test --parallel
+        run: swift test --parallel 2>&1 | tee test-output.log
+
+      - name: Test summary
+        if: always()
+        run: |
+          echo "## SPM Test Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E "Executed|passed|failed|Test run|unexpected" test-output.log >> "$GITHUB_STEP_SUMMARY" || echo "No test summary found" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
   xcode:
     name: CommandCenter Build
+    needs: spm
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_26.3.app || sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: deriveddata-${{ runner.os }}-${{ hashFiles('CommandCenter/**/*.swift', 'Sources/**/*.swift') }}
+          restore-keys: deriveddata-${{ runner.os }}-
 
       - name: Build CommandCenter
         run: |
@@ -50,6 +73,7 @@ jobs:
 
   lint:
     name: SwiftLint
+    needs: spm
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
