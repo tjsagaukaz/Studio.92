@@ -7,6 +7,81 @@ import Foundation
 import AppKit
 import AgentCouncil
 
+// MARK: - Terminal Command Policy
+
+/// Validates LLM-generated terminal commands before shell execution.
+/// Rejects commands that could compromise the host system.
+enum TerminalCommandPolicy {
+
+    /// Patterns that indicate a destructive or dangerous command.
+    /// Checked against the normalized (lowercased, whitespace-collapsed) command.
+    private static let blockedPatterns: [String] = [
+        "sudo ",
+        "rm -rf /",
+        "rm -fr /",
+        "mkfs",
+        "dd if=",
+        "> /dev/sd",
+        "chmod -r 777 /",
+        ":(){ :|:& };:",       // fork bomb
+        "curl | sh",
+        "curl | bash",
+        "wget | sh",
+        "wget | bash",
+        "curl|sh",
+        "curl|bash",
+        "> /etc/",
+        "> /var/",
+        "launchctl ",
+        "defaults write com.apple",
+        "security delete",
+        "security add",
+        "security import",
+        "security unlock-keychain",
+    ]
+
+    /// Sensitive paths that should not be read or written via terminal.
+    private static let sensitivePaths: [String] = [
+        "/.ssh/",
+        "/keychain",
+        "/.gnupg/",
+        "/.aws/credentials",
+        "/.env",
+        "/etc/passwd",
+        "/etc/shadow",
+    ]
+
+    struct Rejection: Sendable {
+        let reason: String
+    }
+
+    /// Check a command for dangerous patterns. Returns nil if allowed,
+    /// or a Rejection explaining why it was blocked.
+    static func check(_ command: String) -> Rejection? {
+        // Reject null bytes — can truncate shell commands.
+        if command.contains("\0") {
+            return Rejection(reason: "Command contains null bytes.")
+        }
+
+        let normalized = command.lowercased()
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+
+        for pattern in blockedPatterns {
+            if normalized.contains(pattern) {
+                return Rejection(reason: "Blocked command pattern: \(pattern.trimmingCharacters(in: .whitespaces))")
+            }
+        }
+
+        for path in sensitivePaths {
+            if normalized.contains(path) {
+                return Rejection(reason: "Command references sensitive path: \(path)")
+            }
+        }
+
+        return nil
+    }
+}
+
 // MARK: - Tool Dispatch
 
 extension AgenticClient {
@@ -455,6 +530,11 @@ extension AgenticClient {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let timeoutSec = min(max(input["timeout"] as? Int ?? 30, 1), 120)
 
+        // Validate the starting command against the safety policy before any execution path.
+        if !startingCommand.isEmpty, let rejection = TerminalCommandPolicy.check(startingCommand) {
+            return ("[terminal] Command blocked by safety policy: \(rejection.reason)", true)
+        }
+
         let effectiveObjective: String
         if !objective.isEmpty {
             effectiveObjective = objective
@@ -616,6 +696,11 @@ extension AgenticClient {
     ) async -> (String, Bool) {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return ("Missing: command", true) }
+
+        if let rejection = TerminalCommandPolicy.check(trimmed) {
+            return ("[terminal] Command blocked by safety policy: \(rejection.reason)", true)
+        }
+
         let commandID = UUID().uuidString
 
         await primePersistentShellToProjectRoot()
@@ -1022,7 +1107,13 @@ extension AgenticClient {
     }
 
     static func shellQuoted(_ value: String) -> String {
-        let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
+        // Strip null bytes (can truncate shell commands) and newlines
+        // (can escape single-quoted context in some shells).
+        let sanitized = value
+            .replacingOccurrences(of: "\0", with: "")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        let escaped = sanitized.replacingOccurrences(of: "'", with: "'\\''")
         return "'\(escaped)'"
     }
 

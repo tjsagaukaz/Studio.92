@@ -98,7 +98,11 @@ extension AgenticClient {
         }
         guard http.statusCode == 200 else {
             var errorData = Data()
-            for try await byte in bytes { errorData.append(byte) }
+            let maxErrorBytes = 512_000 // 512KB cap on error body
+            for try await byte in bytes {
+                errorData.append(byte)
+                if errorData.count >= maxErrorBytes { break }
+            }
             let errorBody = String(decoding: errorData, as: UTF8.self)
             throw AgenticBridgeError.apiError(statusCode: http.statusCode, body: errorBody)
         }
@@ -157,11 +161,15 @@ extension AgenticClient {
                             let payload = String(line.dropFirst(5)).trimmingCharacters(in: .init(charactersIn: " "))
                             if eventData.isEmpty {
                                 eventData = payload
-                            } else {
+                            } else if eventData.count + payload.count < maxBufferSize {
                                 eventData += "\n" + payload
                             }
+                            // If eventData exceeds maxBufferSize, silently drop further data
+                            // lines for this event to prevent memory exhaustion.
                         }
                     }
+
+                    let maxBufferSize = 2_000_000 // 2MB safety cap per buffer
 
                     func consumeDecoded(_ decoded: String) {
                         for character in decoded {
@@ -170,6 +178,10 @@ extension AgenticClient {
                                 lineBuffer.removeAll(keepingCapacity: true)
                             } else {
                                 lineBuffer.append(character)
+                                if lineBuffer.count > maxBufferSize {
+                                    // Malformed stream: single line exceeding 2MB. Drain and reset.
+                                    lineBuffer.removeAll(keepingCapacity: false)
+                                }
                             }
                         }
                     }

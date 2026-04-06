@@ -40,6 +40,8 @@ actor StatefulTerminalEngine {
     private var stderrHandle: FileHandle?
     private var stdoutBuffer = ""
     private var stderrBuffer = ""
+    private var stdoutDecoder = UTF8PipeDecoder()
+    private var stderrDecoder = UTF8PipeDecoder()
     private var activeCommand: ActiveCommand?
     private var queuedWaiters: [CheckedContinuation<Void, Never>] = []
     private var lastCompletedExitStatus: Int?
@@ -179,9 +181,8 @@ actor StatefulTerminalEngine {
                 return
             }
 
-            let chunk = String(decoding: data, as: UTF8.self)
             Task {
-                await StatefulTerminalEngine.shared.handleOutputChunk(chunk, from: .stdout)
+                await StatefulTerminalEngine.shared.handleRawOutput(data, from: .stdout)
             }
         }
 
@@ -194,9 +195,8 @@ actor StatefulTerminalEngine {
                 return
             }
 
-            let chunk = String(decoding: data, as: UTF8.self)
             Task {
-                await StatefulTerminalEngine.shared.handleOutputChunk(chunk, from: .stderr)
+                await StatefulTerminalEngine.shared.handleRawOutput(data, from: .stderr)
             }
         }
 
@@ -213,6 +213,8 @@ actor StatefulTerminalEngine {
         stderrHandle = stderrPipe.fileHandleForReading
         stdoutBuffer.removeAll(keepingCapacity: false)
         stderrBuffer.removeAll(keepingCapacity: false)
+        stdoutDecoder = UTF8PipeDecoder()
+        stderrDecoder = UTF8PipeDecoder()
     }
 
     private func writeToShell(_ command: String) throws {
@@ -221,6 +223,14 @@ actor StatefulTerminalEngine {
         }
 
         try stdinHandle.write(contentsOf: Data(command.utf8))
+    }
+
+    /// Decode raw pipe bytes through the UTF-8 stream decoder to avoid corrupting
+    /// multi-byte characters split across availableData deliveries.
+    private func handleRawOutput(_ data: Data, from source: OutputSource) {
+        let decoder = source == .stdout ? stdoutDecoder : stderrDecoder
+        guard let chunk = decoder.append(data) else { return }
+        handleOutputChunk(chunk, from: source)
     }
 
     private func handleOutputChunk(_ chunk: String, from source: OutputSource) {
@@ -235,6 +245,12 @@ actor StatefulTerminalEngine {
     }
 
     private func flushBufferedOutput(from source: OutputSource) {
+        // Flush any incomplete UTF-8 bytes held by the decoder.
+        let decoder = source == .stdout ? stdoutDecoder : stderrDecoder
+        if let tail = decoder.flush() {
+            handleOutputChunk(tail, from: source)
+        }
+
         switch source {
         case .stdout:
             flushTrailingBuffer(&stdoutBuffer, source: .stdout)
@@ -348,5 +364,56 @@ actor StatefulTerminalEngine {
             continuation.yield(message)
             continuation.finish()
         }
+    }
+}
+
+// MARK: - UTF-8 Pipe Decoder
+
+/// Buffers incomplete UTF-8 sequences across pipe read boundaries.
+/// Pipe `availableData` can split multi-byte characters (emoji, CJK, accented chars)
+/// at arbitrary byte offsets. Without buffering, `String(decoding:as:)` replaces
+/// the incomplete tail with U+FFFD and the next delivery's leading bytes are also
+/// garbled. This decoder holds incomplete trailing bytes until the next delivery
+/// completes the sequence.
+final class UTF8PipeDecoder {
+
+    private var pending = Data()
+
+    /// Append raw bytes. Returns decoded text if any complete UTF-8 content is
+    /// available, or nil if the entire chunk is an incomplete trailing sequence.
+    func append(_ data: Data) -> String? {
+        pending.append(data)
+
+        // Try decoding the full buffer. If it succeeds, all bytes are valid UTF-8.
+        if let result = String(data: pending, encoding: .utf8) {
+            pending.removeAll(keepingCapacity: true)
+            return result.isEmpty ? nil : result
+        }
+
+        // Decoding failed — likely an incomplete multi-byte sequence at the tail.
+        // Walk backwards (up to 3 bytes — max continuation length in UTF-8) to find
+        // the split point: everything before it is valid, everything after is pending.
+        let maxTrail = min(pending.count, 3)
+        for trim in 1...maxTrail {
+            let candidate = pending.prefix(pending.count - trim)
+            if let result = String(data: candidate, encoding: .utf8) {
+                pending = Data(pending.suffix(trim))
+                return result.isEmpty ? nil : result
+            }
+        }
+
+        // Entire buffer is undecodable (shouldn't happen with valid UTF-8 streams).
+        // Drain as lossy to avoid unbounded growth.
+        let lossy = String(decoding: pending, as: UTF8.self)
+        pending.removeAll(keepingCapacity: true)
+        return lossy.isEmpty ? nil : lossy
+    }
+
+    /// Flush any remaining buffered bytes (e.g., on stream close).
+    func flush() -> String? {
+        guard !pending.isEmpty else { return nil }
+        let result = String(decoding: pending, as: UTF8.self)
+        pending.removeAll(keepingCapacity: true)
+        return result.isEmpty ? nil : result
     }
 }

@@ -47,7 +47,7 @@ enum StudioToolName: String, Sendable, CaseIterable, Hashable {
     }
 
     /// Read-only, side-effect-free tools safe for concurrent execution.
-    static let parallelizable: Set<StudioToolName> = [.fileRead, .listFiles, .webSearch]
+    static let parallelizable: Set<StudioToolName> = [.fileRead, .listFiles, .webSearch, .webFetch]
 
     /// Tools that operate on a file path (extractable from input JSON).
     static let filePathTools: Set<StudioToolName> = [.fileRead, .fileWrite, .filePatch]

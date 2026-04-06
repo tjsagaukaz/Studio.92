@@ -432,6 +432,13 @@ final class TodoGateController {
 
     /// Present a plan to the user and suspend until they approve, refine, or reject.
     func requestApproval(_ request: TodoGateRequest) async -> TodoGateDecision {
+        // Guard against double-calls: if a previous request is suspended, reject it
+        // before accepting the new one. Without this, the first continuation is
+        // overwritten and its caller hangs forever.
+        if pendingPlan != nil {
+            resolve(.rejected)
+        }
+
         pendingPlan = request
         return await withCheckedContinuation { continuation in
             self.continuation = continuation

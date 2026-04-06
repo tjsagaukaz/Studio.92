@@ -410,6 +410,14 @@ actor TerminalCoordinator {
         timeoutSeconds: Int,
         progress: @escaping @Sendable (ToolProgress) -> Void
     ) async -> ShellCapture {
+        if let rejection = TerminalCommandPolicy.check(command) {
+            return ShellCapture(
+                output: "[terminal] Command blocked by safety policy: \(rejection.reason)",
+                exitStatus: 1,
+                didTimeout: false
+            )
+        }
+
         let commandID = UUID().uuidString
         SimulatorShellCommandNotifier.commandDidStart(
             id: commandID,
@@ -574,7 +582,11 @@ actor TerminalCoordinator {
     }
 
     private static func shellQuoted(_ value: String) -> String {
-        let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
+        let sanitized = value
+            .replacingOccurrences(of: "\0", with: "")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        let escaped = sanitized.replacingOccurrences(of: "'", with: "'\\''")
         return "'\(escaped)'"
     }
 
