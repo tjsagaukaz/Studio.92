@@ -1009,7 +1009,8 @@ final class PipelineRunOrchestrator {
         latencyRunID: String?,
         planContext: String? = nil,
         dagAssessment: TaskComplexityAnalyzer.ComplexityAssessment? = nil,
-        deterministicPlan: StreamPlan? = nil
+        deterministicPlan: StreamPlan? = nil,
+        taskPlan: TaskPlan? = nil
     ) async {
         let tracer = TraceCollector()
         let runtimePolicy = CommandAccessPreferenceStore.shared.snapshot
@@ -1192,6 +1193,28 @@ final class PipelineRunOrchestrator {
         if let deterministicPlan {
             runner.streamCoordinator.hasDeterministicPlan = true
             runner.streamCoordinator.taskPlanMonitor.setPlan(deterministicPlan)
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // DAG branching: if a TaskPlan is active, run multi-step orchestration
+        // via TaskPlanExecutor. Otherwise, single streaming call (existing path).
+        // ═══════════════════════════════════════════════════════════════════
+        if let taskPlan, taskPlan.steps.count > 1 {
+            await runDAGOrchestration(
+                taskPlan: taskPlan,
+                client: client,
+                systemPrompt: systemPrompt,
+                preparedInput: preparedInput,
+                requestProfile: requestProfile,
+                conversationHistory: conversationHistory,
+                selectedModel: selectedModel,
+                messageID: messageID,
+                tracer: tracer,
+                sessionSpanID: sessionSpanID,
+                latencyRunID: latencyRunID,
+                goal: goal
+            )
+            return
         }
 
         let stream = await client.run(
@@ -1553,6 +1576,404 @@ final class PipelineRunOrchestrator {
             endedAt: finalizationEndedAt,
             notes: "did_complete=\(completed) stage=\(runner.stage.rawValue)"
         )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MARK: - DAG Orchestration
+    // ═══════════════════════════════════════════════════════════════════════════
+    //
+    // When TaskComplexityAnalyzer activates DAG mode, the pipeline runs N
+    // sequential streaming calls — one per plan step. Between steps the
+    // adaptation policy fires, potentially rerouting or skipping downstream
+    // steps. The InlineTaskPlanMonitor updates in real-time as steps progress.
+
+    private func runDAGOrchestration(
+        taskPlan: TaskPlan,
+        client: AgenticClient,
+        systemPrompt: String,
+        preparedInput: PipelineMemoryPackStager.PreparedAgenticUserInput,
+        requestProfile: PipelineMemoryPackStager.AgenticRequestProfile,
+        conversationHistory: [ConversationHistoryTurn],
+        selectedModel: StudioModelDescriptor,
+        messageID: UUID,
+        tracer: TraceCollector,
+        sessionSpanID: UUID,
+        latencyRunID: String?,
+        goal: String
+    ) async {
+        let executor = TaskPlanExecutor(
+            plan: taskPlan,
+            tracer: tracer,
+            parentSpanID: sessionSpanID
+        )
+
+        // Accumulates conversation turns across steps so later steps see earlier work.
+        // Wrapped in a lock-protected class to allow safe capture in @Sendable closures.
+        final class HistoryAccumulator: @unchecked Sendable {
+            private let lock = NSLock()
+            private var turns: [ConversationHistoryTurn]
+            init(_ turns: [ConversationHistoryTurn]) { self.turns = turns }
+            func append(_ turn: ConversationHistoryTurn) {
+                lock.lock(); defer { lock.unlock() }
+                turns.append(turn)
+            }
+            var snapshot: [ConversationHistoryTurn] {
+                lock.lock(); defer { lock.unlock() }
+                return turns
+            }
+        }
+        let history = HistoryAccumulator(conversationHistory)
+
+        // Capture immutable values from @MainActor context for use in @Sendable closure.
+        let capturedPackageRoot = runner.packageRoot
+        let capturedPrimaryModelName = runner.primaryModelName
+
+        let runStep: @Sendable (TaskStep, String?) async -> TaskPlanExecutor.StepResult = {
+            [weak self] step, supplement in
+            guard let self else {
+                return TaskPlanExecutor.StepResult(
+                    stepID: step.id,
+                    succeeded: false,
+                    failureReason: "Orchestrator deallocated"
+                )
+            }
+
+            // Update the UI monitor: mark this step as active.
+            let stepIndex = taskPlan.steps.firstIndex(where: { $0.id == step.id }) ?? 0
+            await self.updateMonitorStepStatus(stepIndex: stepIndex, status: .inProgress)
+            await MainActor.run {
+                self.runner.statusMessage = TaskPlanPromptInjection.userFacingStatus(for: step)
+            }
+
+            // Build the step-specific system prompt.
+            var stepSystemPrompt = systemPrompt
+            if let supplement {
+                stepSystemPrompt += "\n\n" + supplement
+            }
+
+            // Resolve model for this step (may be rerouted by adaptation policy).
+            let stepModel: StudioModelDescriptor
+            if let role = step.recommendedRole {
+                stepModel = StudioModelStrategy.descriptor(
+                    for: role,
+                    packageRoot: capturedPackageRoot
+                )
+                await MainActor.run {
+                    self.runner.activeModelName = stepModel.shortName
+                }
+            } else {
+                stepModel = selectedModel
+            }
+
+            // Run a single streaming call for this step.
+            let result = await self.runSingleDAGStep(
+                client: client,
+                systemPrompt: stepSystemPrompt,
+                preparedInput: preparedInput,
+                requestProfile: requestProfile,
+                conversationHistory: history.snapshot,
+                model: stepModel,
+                messageID: messageID,
+                tracer: tracer,
+                sessionSpanID: sessionSpanID,
+                latencyRunID: latencyRunID,
+                goal: goal,
+                step: step
+            )
+
+            // Record the assistant's output for this step into accumulated history
+            // so the next step has full context.
+            let responseText: String? = await MainActor.run {
+                self.runner.chatThread.messages.first(where: { $0.id == messageID })?.text
+            }
+            if let responseText, !responseText.isEmpty {
+                let stepSummary = "[\(TaskPlanPromptInjection.userFacingStatus(for: step))] \(responseText.suffix(2000))"
+                history.append(
+                    ConversationHistoryTurn(role: .assistant, text: stepSummary)
+                )
+            }
+
+            // Update the UI monitor: mark completed or failed.
+            let resultStatus: StreamPlanStepStatus = result.succeeded ? .completed : .pending
+            await self.updateMonitorStepStatus(stepIndex: stepIndex, status: resultStatus)
+
+            // Restore primary model label.
+            await MainActor.run {
+                self.runner.activeModelName = capturedPrimaryModelName
+            }
+
+            return result
+        }
+
+        let (outcome, finalPlan) = await executor.execute(runStep: runStep)
+
+        // Stamp DAG telemetry on the session span.
+        await TaskPlanTelemetry.stamp(
+            plan: finalPlan,
+            on: sessionSpanID,
+            tracer: tracer
+        )
+
+        // Update monitor with final state.
+        for (index, step) in finalPlan.steps.enumerated() {
+            let uiStatus: StreamPlanStepStatus
+            switch step.status {
+            case .completed: uiStatus = .completed
+            case .skipped:   uiStatus = .skipped
+            case .failed:    uiStatus = .completed  // Show as completed to avoid stuck UI
+            default:         uiStatus = .pending
+            }
+            await updateMonitorStepStatus(stepIndex: index, status: uiStatus)
+        }
+
+        // Finalize the streaming message.
+        switch outcome {
+        case .completed:
+            runner.stage = .succeeded
+            runner.statusMessage = "Complete"
+            runner.errorMessage = nil
+            runner.chatThread.setThinking(false)
+            runner.chatThread.finalizeStreaming(
+                messageID: messageID,
+                finalKind: .assistant,
+                fallbackText: "Done."
+            )
+            runner.streamCoordinator.completeRun()
+
+        case .failed(let reason):
+            runner.stage = .failed
+            runner.errorMessage = PipelineRunner.concise(reason)
+            runner.chatThread.setThinking(false)
+            runner.chatThread.finalizeStreaming(
+                messageID: messageID,
+                finalKind: .assistant,
+                fallbackText: "Task failed: \(reason)"
+            )
+            runner.streamCoordinator.completeRun()
+
+        case .abandoned:
+            runner.stage = .succeeded
+            runner.statusMessage = "Complete"
+            runner.chatThread.setThinking(false)
+            runner.chatThread.finalizeStreaming(
+                messageID: messageID,
+                finalKind: .assistant,
+                fallbackText: "Done."
+            )
+            runner.streamCoordinator.completeRun()
+        }
+
+        runner.compactionCoordinator.setPipelineActive(false)
+
+        // Record assistant turn for conversation continuity.
+        if let finalizedMessage = runner.chatThread.messages.first(where: { $0.id == messageID }) {
+            runner.chatThread.recordAssistantTurn(
+                text: finalizedMessage.text.isEmpty ? "Done." : finalizedMessage.text,
+                thinking: finalizedMessage.thinkingText,
+                thinkingSignature: finalizedMessage.thinkingSignature
+            )
+        }
+
+        // Close session span.
+        let dagSuccess: Bool
+        if case .completed = outcome { dagSuccess = true } else { dagSuccess = false }
+        await tracer.setAttribute("execution.success", value: dagSuccess ? "true" : "false", on: sessionSpanID)
+        await tracer.setAttribute("execution.dag_steps", value: "\(finalPlan.steps.count)", on: sessionSpanID)
+        await tracer.setAttribute("execution.dag_completed", value: "\(finalPlan.completedStepCount)", on: sessionSpanID)
+        if dagSuccess {
+            await tracer.end(sessionSpanID)
+        } else {
+            let reasons = finalPlan.steps.filter { $0.status == .failed }.compactMap(\.failureReason).joined(separator: "; ")
+            await tracer.end(sessionSpanID, error: String(reasons.prefix(500)))
+        }
+        await finalizeTraceSummary(from: tracer)
+    }
+
+    /// Run a single DAG step as a streaming call. Returns a StepResult.
+    /// The streaming events are piped through the same UI infrastructure as non-DAG runs.
+    private func runSingleDAGStep(
+        client: AgenticClient,
+        systemPrompt: String,
+        preparedInput: PipelineMemoryPackStager.PreparedAgenticUserInput,
+        requestProfile: PipelineMemoryPackStager.AgenticRequestProfile,
+        conversationHistory: [ConversationHistoryTurn],
+        model: StudioModelDescriptor,
+        messageID: UUID,
+        tracer: TraceCollector,
+        sessionSpanID: UUID,
+        latencyRunID: String?,
+        goal: String,
+        step: TaskStep
+    ) async -> TaskPlanExecutor.StepResult {
+        let stream = await client.run(
+            system: systemPrompt,
+            userMessage: preparedInput.userMessage,
+            userContentBlocks: preparedInput.userContentBlocks,
+            initialMessages: PipelineMemoryPackStager.agenticHistoryPayload(from: conversationHistory),
+            model: model,
+            outputEffort: requestProfile.effort,
+            verbosity: requestProfile.verbosity,
+            tools: requestProfile.tools,
+            allowedToolNames: requestProfile.allowedToolNames,
+            thinking: requestProfile.thinking,
+            cacheControl: ["type": "ephemeral"],
+            responseFormat: requestProfile.responseFormat,
+            latencyRunID: latencyRunID
+        )
+
+        var stepSucceeded = false
+        var stepErrorMessage: String?
+        let streamBuffer = StreamingTextBuffer()
+        var activeToolSpans: [String: UUID] = [:]
+        var activeToolStartTimes: [String: Date] = [:]
+        var activeToolFirstOutputTimes: [String: Date] = [:]
+        var activeDelegateToolIDs: Set<String> = []
+
+        func flushBufferedText() async {
+            let chunk = await streamBuffer.flush()
+            guard !chunk.isEmpty else { return }
+            guard !runner.streamCoordinator.didDetectPlan else { return }
+            runner.stage = .running
+            runner.chatThread.setThinking(false)
+            runner.chatThread.appendTextDelta(toMessageID: messageID, text: chunk)
+        }
+
+        let textFlushTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: StreamingTextBuffer.flushInterval)
+                await flushBufferedText()
+            }
+        }
+
+        for await event in stream {
+            if Task.isCancelled {
+                textFlushTask.cancel()
+                return TaskPlanExecutor.StepResult(
+                    stepID: step.id, succeeded: false, failureReason: "Cancelled"
+                )
+            }
+
+            switch event {
+            case .textDelta(let text):
+                let shouldFlush = await streamBuffer.append(text)
+                runner.streamCoordinator.handleTextDelta(text)
+                if shouldFlush { await flushBufferedText() }
+
+            case .thinkingDelta(let text):
+                runner.statusMessage = "Thinking..."
+                runner.chatThread.setThinking(false)
+                runner.chatThread.appendThinkingDelta(toMessageID: messageID, text: text)
+                runner.streamCoordinator.handleThinkingDelta(text)
+
+            case .thinkingSignature(let signature):
+                runner.chatThread.setThinkingSignature(toMessageID: messageID, signature: signature)
+
+            case .toolCallStart(let id, let name):
+                runner.statusMessage = PipelineMemoryPackStager.statusMessage(forToolNamed: name)
+                runner.chatThread.setThinking(false)
+                runner.compactionCoordinator.setToolLoopActive(true)
+                let toolSpanID = await tracer.begin(
+                    kind: .toolExecution, name: name,
+                    parentID: sessionSpanID,
+                    attributes: ["toolCallID": id, "dag.step": step.id]
+                )
+                activeToolSpans[id] = toolSpanID
+                activeToolStartTimes[id] = Date()
+                if let delegateLabel = Self.delegateModelLabel(for: name, packageRoot: runner.packageRoot) {
+                    activeDelegateToolIDs.insert(id)
+                    runner.activeModelName = delegateLabel
+                }
+                if let spanID = activeToolSpans[id] {
+                    runner.streamCoordinator.associateToolSpan(id: id, spanID: spanID)
+                }
+                runner.chatThread.startStreamingToolCall(
+                    messageID: messageID,
+                    call: StreamingToolCall(id: id, name: name)
+                )
+                runner.streamCoordinator.handleToolCallStart(id: id, name: name)
+
+            case .toolCallInputDelta(let id, let partialJSON):
+                runner.chatThread.appendToolCallInput(messageID: messageID, callID: id, json: partialJSON)
+                runner.streamCoordinator.handleToolCallInputDelta(id: id, partialJSON: partialJSON)
+
+            case .toolCallCommand(let id, let command):
+                runner.chatThread.updateToolCallDisplayCommand(messageID: messageID, callID: id, command: command)
+                runner.streamCoordinator.handleToolCallCommand(id: id, command: command)
+
+            case .toolCallOutput(let id, let line):
+                if activeToolFirstOutputTimes[id] == nil {
+                    activeToolFirstOutputTimes[id] = Date()
+                }
+                runner.chatThread.appendToolCallOutput(messageID: messageID, callID: id, line: line)
+                runner.streamCoordinator.handleToolCallOutput(id: id, line: line)
+
+            case .toolCallResult(let id, let output, let isError):
+                if isError {
+                    stepErrorMessage = PipelineRunner.concise(output)
+                }
+                if activeDelegateToolIDs.remove(id) != nil {
+                    runner.activeModelName = runner.primaryModelName
+                }
+                runner.chatThread.completeToolCall(
+                    messageID: messageID, callID: id, result: output, isError: isError
+                )
+                runner.streamCoordinator.handleToolCallResult(id: id, result: output, isError: isError)
+                runner.compactionCoordinator.setToolLoopActive(false)
+                // Close tool span
+                if let toolSpanID = activeToolSpans.removeValue(forKey: id) {
+                    let now = Date()
+                    if let start = activeToolStartTimes.removeValue(forKey: id) {
+                        let totalMs = Int(now.timeIntervalSince(start) * 1000)
+                        await tracer.setAttribute("latency.total_ms", value: "\(totalMs)", on: toolSpanID)
+                        let firstOutput = activeToolFirstOutputTimes.removeValue(forKey: id) ?? now
+                        let ttfmoMs = Int(firstOutput.timeIntervalSince(start) * 1000)
+                        await tracer.setAttribute("latency.ttfmo_ms", value: "\(ttfmoMs)", on: toolSpanID)
+                    }
+                    if isError {
+                        await tracer.end(toolSpanID, error: "tool_error")
+                    } else {
+                        await tracer.end(toolSpanID)
+                    }
+                }
+
+            case .usage(let inputTokens, let outputTokens):
+                runner.chatThread.updateTokenUsage(messageID: messageID, input: inputTokens, output: outputTokens)
+                runner.compactionCoordinator.accumulateUsage(input: inputTokens, output: outputTokens)
+
+            case .completed:
+                stepSucceeded = true
+
+            case .error(let message):
+                stepErrorMessage = message
+            }
+        }
+
+        textFlushTask.cancel()
+        await flushBufferedText()
+
+        // Determine step success: the stream completed without fatal errors.
+        // Tool errors during the step are NOT fatal — the LLM may recover.
+        // Only stream-level errors or explicit error events are fatal.
+        let succeeded = stepSucceeded && stepErrorMessage == nil
+        return TaskPlanExecutor.StepResult(
+            stepID: step.id,
+            succeeded: succeeded,
+            failureReason: stepErrorMessage
+        )
+    }
+
+    /// Update a single step's status in the InlineTaskPlanMonitor.
+    private func updateMonitorStepStatus(stepIndex: Int, status: StreamPlanStepStatus) async {
+        let monitor = runner.streamCoordinator.taskPlanMonitor
+        guard stepIndex < monitor.steps.count else { return }
+        let inlineStatus: InlineTaskStepStatus
+        switch status {
+        case .inProgress: inlineStatus = .active
+        case .completed:  inlineStatus = .completed
+        case .skipped:    inlineStatus = .skipped
+        case .pending:    inlineStatus = .pending
+        }
+        monitor.steps[stepIndex].status = inlineStatus
     }
 
     private func finalizeTraceSummary(from tracer: TraceCollector) async {

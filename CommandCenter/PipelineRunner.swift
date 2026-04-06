@@ -204,8 +204,10 @@ final class PipelineRunner {
         // Generate plan context supplement (nil for simple tasks).
         let planContext: String?
         let deterministicPlan: StreamPlan?
+        let taskPlan: TaskPlan?
         if complexity.shouldUseDAG {
             let plan = TaskPlanGenerator.generate(goal: goal, assessment: complexity)
+            taskPlan = plan
             if let firstStep = plan.steps.first {
                 planContext = TaskPlanPromptInjection.promptSupplement(for: plan, currentStep: firstStep)
             } else {
@@ -215,6 +217,7 @@ final class PipelineRunner {
         } else {
             planContext = nil
             deterministicPlan = nil
+            taskPlan = nil
         }
 
         // Save to history
@@ -298,7 +301,8 @@ final class PipelineRunner {
                     latencyRunID: resolvedLatencyRunID,
                     planContext: planContext,
                     dagAssessment: complexity,
-                    deterministicPlan: deterministicPlan
+                    deterministicPlan: deterministicPlan,
+                    taskPlan: taskPlan
                 )
             }
             activeAgenticTask = task
@@ -764,7 +768,8 @@ final class PipelineRunner {
         latencyRunID: String?,
         planContext: String? = nil,
         dagAssessment: TaskComplexityAnalyzer.ComplexityAssessment? = nil,
-        deterministicPlan: StreamPlan? = nil
+        deterministicPlan: StreamPlan? = nil,
+        taskPlan: TaskPlan? = nil
     ) async {
         let orchestrator = PipelineRunOrchestrator(runner: self)
         await orchestrator.run(
@@ -778,7 +783,8 @@ final class PipelineRunner {
             latencyRunID: latencyRunID,
             planContext: planContext,
             dagAssessment: dagAssessment,
-            deterministicPlan: deterministicPlan
+            deterministicPlan: deterministicPlan,
+            taskPlan: taskPlan
         )
     }
 
