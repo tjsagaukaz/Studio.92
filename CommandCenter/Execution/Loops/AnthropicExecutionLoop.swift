@@ -91,6 +91,7 @@ final class AnthropicExecutionLoop: ExecutionLoopEngine, @unchecked Sendable {
                     var assistantText    = ""
                     var assistantBlocksByIndex: [Int: AssistantBlockAccumulator] = [:]
                     var stopReason: String?
+                    var firstTextDeltaRecorded = false
 
                     // Stream one model turn.
                     let events = try await client.streamRequest(
@@ -112,10 +113,13 @@ final class AnthropicExecutionLoop: ExecutionLoopEngine, @unchecked Sendable {
 
                         switch event {
                         case .textDelta(let index, let text):
-                            await LatencyDiagnostics.shared.markLLMFirstTextDelta(
-                                runID: latencyRunID,
-                                key: llmCallKey
-                            )
+                            if !firstTextDeltaRecorded {
+                                firstTextDeltaRecorded = true
+                                await LatencyDiagnostics.shared.markLLMFirstTextDelta(
+                                    runID: latencyRunID,
+                                    key: llmCallKey
+                                )
+                            }
                             assistantText += text
                             if assistantBlocksByIndex[index] == nil {
                                 assistantBlocksByIndex[index] = .text("")
@@ -186,7 +190,7 @@ final class AnthropicExecutionLoop: ExecutionLoopEngine, @unchecked Sendable {
                         .sorted()
                         .compactMap { assistantBlocksByIndex[$0]?.assistantContentBlock }
 
-                    if assistantContent.isEmpty {
+                    if assistantContent.isEmpty && !assistantText.isEmpty {
                         assistantContent.append(["type": "text", "text": assistantText])
                     }
                     messages.append(["role": "assistant", "content": assistantContent])

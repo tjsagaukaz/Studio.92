@@ -34,6 +34,10 @@ final class PipelineRunner {
 
     var stage: PipelineStage = .idle
     var statusMessage: String = "Ready"
+    /// Synchronous sentinel set immediately on run entry, before any suspension points.
+    /// Prevents a second `run()` call from passing the `isRunning` guard while the first
+    /// is suspended between guard and `beginAgenticPresentation`.
+    private var isPreparingRun = false
     var activeModelName: String?
     /// The primary model name for the current run — restored after sub-agent execution.
     var primaryModelName: String?
@@ -151,7 +155,8 @@ final class PipelineRunner {
         if let cancellationTask {
             await cancellationTask.value
         }
-        guard !isRunning else { return } // Hard run lock
+        guard !isRunning, !isPreparingRun else { return } // Hard run lock
+        isPreparingRun = true
 
         let resolvedLatencyRunID = latencyRunID ?? activeLatencyRunID ?? LatencyDiagnostics.makeRunID()
         activeLatencyRunID = resolvedLatencyRunID
@@ -294,6 +299,7 @@ final class PipelineRunner {
 
             // Show reviewing state while gate is visible.
             stage = .running
+            isPreparingRun = false
             statusMessage = "Reviewing plan…"
 
             let decision = await TodoGateController.shared.requestApproval(gateRequest)
@@ -305,10 +311,12 @@ final class PipelineRunner {
                 // User dismissed the gate to use the composer for refinement.
                 // The calling UI layer focuses the composer. Pipeline does not execute.
                 stage = .idle
+                isPreparingRun = false
                 statusMessage = ""
                 return
             case .rejected:
                 stage = .idle
+                isPreparingRun = false
                 statusMessage = ""
                 return
             }
@@ -377,6 +385,7 @@ final class PipelineRunner {
         activeGoal = goal
         activeDisplayGoal = displayGoal ?? goal
         stage = .failed
+        isPreparingRun = false
         statusMessage = "Configure model access"
         criticVerdict = nil
         errorMessage = configurationMessage
@@ -774,6 +783,7 @@ final class PipelineRunner {
         activeGoal = goal
         activeDisplayGoal = displayGoal ?? goal
         stage = .running
+        isPreparingRun = false // Running state now guards against double-entry
         statusMessage = "Working..."
         criticVerdict = nil
         errorMessage = nil

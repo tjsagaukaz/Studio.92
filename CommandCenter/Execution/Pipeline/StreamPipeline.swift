@@ -190,6 +190,7 @@ final class StreamPhaseController {
 
     @ObservationIgnored private var phaseEnteredAt: Date = .distantPast
     @ObservationIgnored private var pendingPhaseTask: Task<Void, Never>?
+    @ObservationIgnored private var renderCommitTask: Task<Void, Never>?
     @ObservationIgnored private(set) var streamStartedAt: Date?
     @ObservationIgnored private(set) var firstMeaningfulSignalAt: Date?
     @ObservationIgnored private var thinkingBuffer: String = ""
@@ -480,7 +481,8 @@ final class StreamPhaseController {
 
         // After one render cycle, mark the phase as rendered.
         // This enables elision logic for the *next* transition.
-        Task { @MainActor in
+        renderCommitTask?.cancel()
+        renderCommitTask = Task { @MainActor in
             // Yield to the run loop so SwiftUI commits at least one frame.
             try? await Task.sleep(for: .milliseconds(8))
             guard self.phase == target else { return }
@@ -1329,9 +1331,16 @@ final class StreamPipelineCoordinator {
             refreshViewportPlan()
         }
 
-        // Try to detect plan in accumulated text (once)
+        // Try to detect plan in accumulated text (once).
+        // Cap scan window to avoid O(n²) re-scanning on every token.
         if !planDetected && accumulatedNarrative.count > 60 {
-            if let plan = SemanticEventTransformer.detectPlan(in: accumulatedNarrative) {
+            let scanWindow: String
+            if accumulatedNarrative.count > 2000 {
+                scanWindow = String(accumulatedNarrative.suffix(2000))
+            } else {
+                scanWindow = accumulatedNarrative
+            }
+            if let plan = SemanticEventTransformer.detectPlan(in: scanWindow) {
                 planDetected = true
                 phaseController.setPlan(plan)
                 driveViewportPlan(plan)

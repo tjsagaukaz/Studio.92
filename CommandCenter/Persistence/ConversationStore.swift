@@ -80,6 +80,12 @@ struct ChatAttachment: Identifiable, Equatable, Hashable {
     }
 }
 
+/// Token usage for a single message. Named struct so ChatMessage can synthesize Equatable.
+struct TokenCount: Equatable {
+    var input: Int
+    var output: Int
+}
+
 struct ChatMessage: Identifiable, Equatable {
 
     enum Kind: String {
@@ -124,32 +130,11 @@ struct ChatMessage: Identifiable, Equatable {
     /// Tool calls that are being assembled during streaming.
     var streamingToolCalls: [StreamingToolCall] = []
     /// Token usage for this message.
-    var tokenUsage: (input: Int, output: Int)?
+    var tokenUsage: TokenCount?
     /// Whether this message was finalized by cancellation and may be incomplete.
     var isPartial: Bool = false
 
-    static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
-        lhs.id == rhs.id
-            && lhs.kind == rhs.kind
-            && lhs.goal == rhs.goal
-            && lhs.text == rhs.text
-            && lhs.detailText == rhs.detailText
-            && lhs.timestamp == rhs.timestamp
-            && lhs.screenshotPath == rhs.screenshotPath
-            && lhs.metrics == rhs.metrics
-            && lhs.executionTree == rhs.executionTree
-            && lhs.attachments == rhs.attachments
-            && lhs.epochID == rhs.epochID
-            && lhs.packetID == rhs.packetID
-            && lhs.streamingText == rhs.streamingText
-            && lhs.isStreaming == rhs.isStreaming
-            && lhs.thinkingText == rhs.thinkingText
-            && lhs.thinkingSignature == rhs.thinkingSignature
-            && lhs.streamingToolCalls == rhs.streamingToolCalls
-            && lhs.tokenUsage?.input == rhs.tokenUsage?.input
-            && lhs.tokenUsage?.output == rhs.tokenUsage?.output
-            && lhs.isPartial == rhs.isPartial
-    }
+    // Synthesized by the compiler now that all fields conform to Equatable.
 }
 
 /// A tool call being progressively assembled during streaming.
@@ -1644,9 +1629,9 @@ final class ChatThread {
     func updateTokenUsage(messageID: UUID, input: Int, output: Int) {
         mutateMessage(id: messageID, marksStructureChange: false) { message in
             if let existing = message.tokenUsage {
-                message.tokenUsage = (input: existing.input + input, output: existing.output + output)
+                message.tokenUsage = TokenCount(input: existing.input + input, output: existing.output + output)
             } else {
-                message.tokenUsage = (input: input, output: output)
+                message.tokenUsage = TokenCount(input: input, output: output)
             }
         }
     }
