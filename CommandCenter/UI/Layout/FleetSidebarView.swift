@@ -735,7 +735,7 @@ struct SidebarFooter: View {
             Spacer()
 
             footerButton(icon: "list.bullet.clipboard", label: "Rules") {
-                reveal(relativePath: ".codex/rules/default.rules")
+                reveal(relativePath: ".studio92/rules/default.rules")
             }
         }
         .foregroundStyle(StudioTextColor.secondary)
@@ -842,7 +842,7 @@ struct SidebarWorkspaceFooter: View {
                         revealPath(".agents/skills", in: workspacePath)
                     }
                     workspaceMenuItem(icon: "list.bullet.clipboard", label: "Rules") {
-                        revealPath(".codex/rules/default.rules", in: workspacePath)
+                        revealPath(".studio92/rules/default.rules", in: workspacePath)
                     }
                     Rectangle()
                         .fill(Color.white.opacity(0.07))

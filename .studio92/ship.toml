@@ -3,7 +3,7 @@ version = 1
 [workspace]
 session_dir = ".studio92/sessions"
 worktree_dir = ".studio92/worktrees"
-branch_prefix = "codex/"
+branch_prefix = "studio92/"
 
 [product]
 platforms = ["ios", "macos"]

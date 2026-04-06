@@ -1,6 +1,6 @@
 # Studio.92 Architecture
 
-Studio.92 is a Codex-compatible Apple app builder. It plans, executes, verifies, and ships
+Studio.92 is an AI-powered Apple app builder. It plans, executes, verifies, and ships
 native SwiftUI apps through a multi-model agentic pipeline — from a single goal to a
 TestFlight-ready binary.
 
@@ -34,7 +34,7 @@ TestFlight-ready binary.
 │  ToolDispatch → per-tool execution                              │
 │  ToolGuardrails (SandboxPolicy · ToolPermissionPolicy)          │
 │  ToolParallelism (read/write partitioning, TaskGroup ceiling)   │
-│  StatefulTerminalEngine · CodexTerminalCoordinator              │
+│  StatefulTerminalEngine · TerminalCoordinator                    │
 ├─────────────────────────────────────────────────────────────────┤
 │  Bridge Layer                                                   │
 │  AgenticBridge (provider adapter — Anthropic + OpenAI)          │

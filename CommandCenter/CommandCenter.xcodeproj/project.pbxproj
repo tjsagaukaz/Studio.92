@@ -11,7 +11,7 @@
 		0256ECC3A8DF6C545A95DFAF /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B4D8CE275DF28005E3825BB8 /* Cocoa.framework */; };
 		049F242DE39197BA8FF0C4C9 /* ArchitectureValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E54E86D54FB79B7F011E22C8 /* ArchitectureValidator.swift */; };
 		0BB67EFD4BCC5BD0B6430253 /* ConversationDetailViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54E8EF5A6BC271B03CABAA64 /* ConversationDetailViews.swift */; };
-		19917E4EE5C91BF5FDC36DF7 /* CodexTerminalCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 775B4B1CB3E88F5612D3867B /* CodexTerminalCoordinator.swift */; };
+		19917E4EE5C91BF5FDC36DF7 /* TerminalCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 775B4B1CB3E88F5612D3867B /* TerminalCoordinator.swift */; };
 		1A2B3C4D5E6F7A8B9C0D1E2F /* ConversationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6A7B8C9D0E1F2 /* ConversationStore.swift */; };
 		1E1FEF724EAB5F024344F5E4 /* ChatThreadComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 334556BC72737D361460E7E1 /* ChatThreadComponents.swift */; };
 		234DA8FA799E9C121DE54888 /* GitFoundation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E6F411FA149895B47F9BE9 /* GitFoundation.swift */; };
@@ -138,7 +138,7 @@
 		66048FAB701ED1745115AC69 /* SessionInspectorModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionInspectorModel.swift; sourceTree = "<group>"; };
 		664DBA53DF674619E6090CBF /* AgenticBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgenticBridge.swift; sourceTree = "<group>"; };
 		6F0EC998D64DC13749494CAC /* NarrativeRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NarrativeRenderer.swift; sourceTree = "<group>"; };
-		775B4B1CB3E88F5612D3867B /* CodexTerminalCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexTerminalCoordinator.swift; sourceTree = "<group>"; };
+		775B4B1CB3E88F5612D3867B /* TerminalCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalCoordinator.swift; sourceTree = "<group>"; };
 		7786CDF5DA4B2DD35D029C4D /* WorktreeJobViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorktreeJobViews.swift; sourceTree = "<group>"; };
 		78812A36A4EAA85CBB39408B /* SimulatorPreviewService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorPreviewService.swift; sourceTree = "<group>"; };
 		7A9D73D520077B899911E482 /* MemoryHardening.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryHardening.swift; sourceTree = "<group>"; };
@@ -459,7 +459,7 @@
 			isa = PBXGroup;
 			children = (
 				D5E0528FE6487D95E24D423D /* ToolDispatch.swift */,
-				775B4B1CB3E88F5612D3867B /* CodexTerminalCoordinator.swift */,
+				775B4B1CB3E88F5612D3867B /* TerminalCoordinator.swift */,
 				FFD58665651DA71F7E8A8272 /* StatefulTerminalEngine.swift */,
 				239EBAFDFA23D2EF5670921C /* ToolResultViews.swift */,
 				F4DD050439E57775A7AC464A /* ToolGuardrails.swift */,
@@ -613,7 +613,7 @@
 				26B3F201225767B9FE58C4EB /* AgenticBridgeTypes.swift in Sources */,
 				8CFE538E1BAF16C5C498A882 /* ToolDispatch.swift in Sources */,
 				6AFAEDE425C1E9D22FB5768E /* AnthropicStreamHandler.swift in Sources */,
-				19917E4EE5C91BF5FDC36DF7 /* CodexTerminalCoordinator.swift in Sources */,
+				19917E4EE5C91BF5FDC36DF7 /* TerminalCoordinator.swift in Sources */,
 				DFBD3F1F59A98DCECC9FB980 /* OpenAIStreamHandler.swift in Sources */,
 				049F242DE39197BA8FF0C4C9 /* ArchitectureValidator.swift in Sources */,
 				BE74AD3C412D2F167EA5FB93 /* ArtifactViews.swift in Sources */,

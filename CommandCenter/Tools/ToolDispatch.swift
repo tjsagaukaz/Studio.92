@@ -465,7 +465,7 @@ extension AgenticClient {
         }
 
         if let openAIKey, !openAIKey.isEmpty {
-            let coordinator = CodexTerminalCoordinator(
+            let coordinator = TerminalCoordinator(
                 apiKey: openAIKey,
                 projectRoot: projectRoot
             )
@@ -492,7 +492,7 @@ extension AgenticClient {
         }
 
         guard !startingCommand.isEmpty else {
-            return ("Terminal executor unavailable: configure OPENAI_API_KEY for Codex shell handling.", true)
+            return ("Terminal executor unavailable: configure OPENAI_API_KEY for shell handling.", true)
         }
 
         progress(.output("[ERROR] OPENAI_API_KEY not configured. Using direct terminal fallback."))

@@ -1,4 +1,4 @@
-// CodexTerminalCoordinator.swift
+// TerminalCoordinator.swift
 // Studio.92 — Command Center
 // Terminal coordination and Fastlane deployment — extracted from AgenticBridge.swift
 
@@ -148,9 +148,9 @@ actor ShellCommandLifecycle {
     }
 }
 
-// MARK: - Codex Terminal Coordinator
+// MARK: - Terminal Coordinator
 
-actor CodexTerminalCoordinator {
+actor TerminalCoordinator {
 
     private struct FunctionCall {
         let callID: String

@@ -158,7 +158,7 @@ enum DefaultToolSchemas {
         "strict": false,
         "input_examples": [
             [
-                "branch_name": "codex/app-store-audit",
+                "branch_name": "studio92/app-store-audit",
                 "target_directory": "app-store-audit",
                 "task_prompt": "Audit the iOS app for current App Store metadata, privacy manifest, and signing gaps."
             ]

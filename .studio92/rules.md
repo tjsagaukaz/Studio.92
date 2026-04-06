@@ -110,7 +110,7 @@ ArchitectureValidator at runtime and by review at PR time.
     `CommandCenter/`, the SPM version is the source of truth. CC should import, not
     shadow-copy. (Current debt: CC does not yet import AgentCouncil as a dependency.)
 
-25. **Protected paths are read-only by default.** `.git/`, `.codex/`, `.studio92/`,
+25. **Protected paths are read-only by default.** `.git/`, `.studio92/`,
     and agent/config state must not be mutated by tool execution unless the task
     explicitly requires it and the user confirms.
 

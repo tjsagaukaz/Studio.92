@@ -141,7 +141,7 @@ CommandCenter/
 │   ├── ToolParallelism         Read/write partitioning, TaskGroup
 │   ├── ToolResultViews         UI for tool call results
 │   ├── StatefulTerminalEngine  Persistent terminal sessions
-│   └── CodexTerminalCoordinator Terminal lifecycle management
+│   └── TerminalCoordinator    Terminal lifecycle management
 │
 ├── Persistence/            SwiftData + conversation state (5 files)
 │   ├── ConversationStore       @Observable in-memory conversation

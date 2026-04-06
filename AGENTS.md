@@ -1,6 +1,6 @@
 # Studio.92 Agents
 
-Studio.92 is a Codex-compatible Apple app builder. The system should be able to research the live date, inspect the local machine, edit the workspace, verify code, and prepare apps for TestFlight and App Store Connect.
+Studio.92 is an AI-powered Apple app builder. The system should be able to research the live date, inspect the local machine, edit the workspace, verify code, and prepare apps for TestFlight and App Store Connect.
 
 ## Model Roles
 
@@ -32,7 +32,7 @@ Studio.92 is a Codex-compatible Apple app builder. The system should be able to 
 - Default to `Workspace Only` + `Ask on Risky Actions`. Escalate to `Full Mac Access` only when explicitly enabled for the current task.
 - Prefer granting explicit extra roots over broad machine-wide access when the task needs files outside the main workspace.
 - Even in `Full Mac Access`, treat destructive machine actions and shipping actions as high risk: deleting outside the workspace, changing signing or keychain state, modifying credentials, and submitting builds should require an explicit arm or confirmation step.
-- Keep protected paths read-only by default even in writable workflows: `.git/`, `.codex/`, `.studio92/`, and other agent/config state unless the task explicitly requires changing them.
+- Keep protected paths read-only by default even in writable workflows: `.git/`, `.studio92/`, and other agent/config state unless the task explicitly requires changing them.
 - In background worktrees, edit only inside the assigned worktree path unless the user explicitly asks for broader machine access.
 - Surface concrete ship blockers first: signing, entitlements, privacy manifests, bundle identifiers, icons, screenshots, metadata, failing builds, and policy issues.
 - Keep outputs concise, grounded, and diff-oriented.
@@ -43,4 +43,4 @@ Studio.92 is a Codex-compatible Apple app builder. The system should be able to 
 - Background sessions live in `.studio92/sessions/`
 - Isolated worktrees live in `.studio92/worktrees/`
 - Apple shipping defaults live in `.studio92/ship.toml`
-- Shared Codex rules live in `.codex/rules/default.rules`
+- Shared rules live in `.studio92/rules/default.rules`

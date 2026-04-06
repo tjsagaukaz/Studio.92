@@ -1105,7 +1105,7 @@ private enum WorkspaceFileFinder {
     ]
 
     private static let skipDirectories: Set<String> = [
-        ".git", "DerivedData", "node_modules", ".build", ".studio92", ".codex",
+        ".git", "DerivedData", "node_modules", ".build", ".studio92",
         "xcuserdata", "Pods", "__pycache__", ".cache"
     ]
 
