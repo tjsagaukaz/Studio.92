@@ -315,6 +315,9 @@ struct MarkdownMessageContent: View, Equatable {
                         isStreaming: isStreaming
                     )
                     .padding(.bottom, StudioChatLayout.paragraphSpacing)
+                case .liveDiff(let diffBlock):
+                    LiveDiffCard(block: diffBlock, isStreaming: isStreaming)
+                        .padding(.bottom, StudioChatLayout.paragraphSpacing)
                 case .table(let headers, let rows):
                     MarkdownTableView(headers: headers, rows: rows, tone: tone)
                         .padding(.bottom, StudioChatLayout.paragraphSpacing)
@@ -827,6 +830,41 @@ struct CodeBlockCopyButton: View {
     }
 }
 
+// MARK: - LiveDiff Models
+
+/// A single rendered line inside a live diff block.
+struct LiveDiffLine: Identifiable, Equatable {
+    enum Kind: Equatable { case context, addition, deletion, hunkHeader }
+    /// Ordinal index from the raw diff codeLines array — stable across incremental parses.
+    let id: Int
+    let kind: Kind
+    /// Line text without the leading +/-/space sigil.
+    let text: String
+}
+
+/// Incrementally-built unified diff block. Emitted while the fence is still open.
+struct LiveDiffBlock: Equatable {
+    let id: String
+    /// Last path component, e.g. "NetworkManager.swift"
+    let filename: String
+    /// Full path for viewport deep-link, e.g. "Sources/Network/NetworkManager.swift"
+    let filePath: String
+    var lines: [LiveDiffLine]
+    var additionCount: Int
+    var deletionCount: Int
+    /// True once the closing ``` has been seen. Triggers the 1.5s collapse timer.
+    var isComplete: Bool
+
+    // Performance: only compare shape — avoid deep array comparison on every re-render.
+    static func == (lhs: LiveDiffBlock, rhs: LiveDiffBlock) -> Bool {
+        lhs.id == rhs.id
+            && lhs.isComplete == rhs.isComplete
+            && lhs.lines.count == rhs.lines.count
+            && lhs.additionCount == rhs.additionCount
+            && lhs.deletionCount == rhs.deletionCount
+    }
+}
+
 struct MarkdownBlock: Identifiable {
 
     private struct ListEntry {
@@ -844,6 +882,8 @@ struct MarkdownBlock: Identifiable {
         case code(language: String?, content: String, targetHint: String?)
         case table(headers: [String], rows: [[String]])
         case thematicBreak
+        /// A unified diff block — emitted incrementally while the fence is still open.
+        case liveDiff(LiveDiffBlock)
     }
 
     let id: String
@@ -873,7 +913,63 @@ struct MarkdownBlock: Identifiable {
                     codeLines.append(lines[index])
                     index += 1
                 }
-                if index < lines.count { index += 1 }
+                let isCompleteFence = index < lines.count
+                if isCompleteFence { index += 1 }
+
+                // ── Live diff block ──────────────────────────────────────────────────────
+                // Intercept ```diff fences and build a LiveDiffBlock instead of a .code block.
+                // Partial blocks (incomplete fence) are still emitted so the card renders
+                // while the stream is still open.
+                if language.lowercased() == "diff" {
+                    var diffLines: [LiveDiffLine] = []
+                    var filename = ""
+                    var filePath = ""
+                    var addCount = 0
+                    var delCount = 0
+                    for (i, rawLine) in codeLines.enumerated() {
+                        if rawLine.hasPrefix("--- ") || rawLine.hasPrefix("+++ ") {
+                            let rest = String(rawLine.dropFirst(4))
+                            // Strip git a/ b/ prefixes
+                            let path = (rest.hasPrefix("a/") || rest.hasPrefix("b/"))
+                                ? String(rest.dropFirst(2))
+                                : rest
+                            if rawLine.hasPrefix("+++ ") && !path.isEmpty && path != "/dev/null" {
+                                filePath = path
+                                filename = (path as NSString).lastPathComponent
+                            }
+                            continue // header lines are not display lines
+                        }
+                        if rawLine.hasPrefix("@@") {
+                            diffLines.append(LiveDiffLine(id: i, kind: .hunkHeader, text: rawLine))
+                        } else if rawLine.hasPrefix("+") && !rawLine.hasPrefix("+++") {
+                            addCount += 1
+                            diffLines.append(LiveDiffLine(id: i, kind: .addition, text: String(rawLine.dropFirst())))
+                        } else if rawLine.hasPrefix("-") && !rawLine.hasPrefix("---") {
+                            delCount += 1
+                            diffLines.append(LiveDiffLine(id: i, kind: .deletion, text: String(rawLine.dropFirst())))
+                        } else {
+                            let text = rawLine.hasPrefix(" ") ? String(rawLine.dropFirst()) : rawLine
+                            diffLines.append(LiveDiffLine(id: i, kind: .context, text: text))
+                        }
+                    }
+                    let diffBlockID = "diff-\(codeBlockOrdinal)"
+                    codeBlockOrdinal += 1
+                    blocks.append(MarkdownBlock(
+                        id: diffBlockID,
+                        kind: .liveDiff(LiveDiffBlock(
+                            id: diffBlockID,
+                            filename: filename,
+                            filePath: filePath,
+                            lines: diffLines,
+                            additionCount: addCount,
+                            deletionCount: delCount,
+                            isComplete: isCompleteFence
+                        ))
+                    ))
+                    continue
+                }
+
+                // ── Regular code block ───────────────────────────────────────────────────
                 let inferredTargetHint = inferredCodeTargetHint(
                     previousBlock: blocks.last,
                     previousLine: index > 1 ? lines[index - codeLines.count - 2] : nil,
@@ -1214,6 +1310,284 @@ struct MarkdownBlock: Identifiable {
     private static func stableID(prefix: String, content: String) -> String {
         let digest = String(content.hashValue, radix: 16, uppercase: false)
         return "\(prefix)-\(digest)"
+    }
+}
+
+// MARK: - LiveDiffCard
+
+/// The "Light Block" — a holographic inline diff card that streams code mutations
+/// in real-time, then collapses into a compact pill once the write completes.
+struct LiveDiffCard: View {
+
+    let block: LiveDiffBlock
+    let isStreaming: Bool
+
+    @Environment(\.viewportActionContext) private var viewportActions
+    @AppStorage("packageRoot") private var storedPackageRoot = ""
+    @State private var isCollapsed = false
+    @State private var collapseTask: Task<Void, Never>?
+    @State private var didFireViewportSync = false
+    @State private var dotPulse = false
+
+    var body: some View {
+        Group {
+            if isCollapsed {
+                collapsedPill
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .scale(scale: 0.96, anchor: .top)),
+                        removal: .opacity
+                    ))
+            } else {
+                expandedCard
+                    .transition(.asymmetric(
+                        insertion: .opacity,
+                        removal: .opacity.combined(with: .scale(scale: 0.94, anchor: .top))
+                    ))
+            }
+        }
+        .animation(.spring(duration: 0.40, bounce: 0.06), value: isCollapsed)
+        // Viewport sync: switch to the file as soon as the filename token is parsed.
+        .onChange(of: block.filename) { _, newName in
+            guard !newName.isEmpty, !didFireViewportSync else { return }
+            didFireViewportSync = true
+            viewportActions.showFilePreview(resolvedPath(for: block.filePath.isEmpty ? newName : block.filePath))
+        }
+        .onAppear {
+            if !block.filename.isEmpty, !didFireViewportSync {
+                didFireViewportSync = true
+                viewportActions.showFilePreview(resolvedPath(for: block.filePath.isEmpty ? block.filename : block.filePath))
+            }
+        }
+        // Collapse timer: 1.5s after stream closes.
+        .onChange(of: block.isComplete) { _, complete in
+            guard complete else { return }
+            collapseTask?.cancel()
+            collapseTask = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(1.5))
+                guard !Task.isCancelled else { return }
+                withAnimation(.spring(duration: 0.48, bounce: 0.04)) {
+                    isCollapsed = true
+                }
+            }
+        }
+    }
+
+    // MARK: - Path resolution
+
+    /// Resolve a diff-header relative path (e.g. "Sources/Foo/Bar.swift") to an
+    /// absolute path using the stored package root, mirroring CodeBlockCard's logic.
+    private func resolvedPath(for diffPath: String) -> String {
+        guard !diffPath.hasPrefix("/") else { return diffPath }
+        let root = packageRoot
+        return root.isEmpty ? diffPath : "\(root)/\(diffPath)"
+    }
+
+    private var packageRoot: String {
+        if !storedPackageRoot.isEmpty,
+           FileManager.default.fileExists(atPath: "\(storedPackageRoot)/Package.swift") {
+            return storedPackageRoot
+        }
+        var url = Bundle.main.bundleURL
+        for _ in 0..<6 {
+            url = url.deletingLastPathComponent()
+            if FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
+                return url.path
+            }
+        }
+        return FileManager.default.currentDirectoryPath
+    }
+
+    // MARK: - Expanded Card
+
+    private var expandedCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Rectangle()
+                .fill(StudioAccentColor.primary.opacity(0.18))
+                .frame(height: 0.5)
+            diffLines
+        }
+        .background(Color(hex: "#0B0D10"))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(StudioAccentColor.primary.opacity(0.5), lineWidth: 0.5)
+        )
+    }
+
+    // MARK: - Header bar
+
+    private var header: some View {
+        HStack(spacing: StudioSpacing.sm) {
+            liveIndicator
+
+            Text(block.filename.isEmpty ? "diff" : block.filename)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(StudioTextColor.secondary)
+                .lineLimit(1)
+
+            Spacer()
+
+            if block.additionCount > 0 || block.deletionCount > 0 {
+                HStack(spacing: 5) {
+                    Text("+\(block.additionCount)")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(StudioColorTokens.Syntax.diffAddition.opacity(0.85))
+                    Text("-\(block.deletionCount)")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(StudioColorTokens.Syntax.diffRemoval.opacity(0.70))
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial)
+    }
+
+    @ViewBuilder
+    private var liveIndicator: some View {
+        if !block.isComplete {
+            Circle()
+                .fill(StudioColorTokens.Syntax.diffAddition)
+                .frame(width: 6, height: 6)
+                .scaleEffect(dotPulse ? 1.4 : 1.0)
+                .opacity(dotPulse ? 0.70 : 1.0)
+                .animation(.easeInOut(duration: 0.75).repeatForever(autoreverses: true), value: dotPulse)
+                .onAppear { dotPulse = true }
+        } else {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(StudioColorTokens.Syntax.diffAddition)
+                .transition(.opacity)
+        }
+    }
+
+    // MARK: - Diff Lines
+
+    private var diffLines: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(windowedLines) { line in
+                LiveDiffLineRow(line: line)
+                    .transition(line.kind == .addition
+                        ? AnyTransition.modifier(
+                            active: DiffBlurModifier(radius: 3.5, opacity: 0),
+                            identity: DiffBlurModifier(radius: 0, opacity: 1)
+                          )
+                        : AnyTransition.identity
+                    )
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: block.lines.count)
+        .padding(.vertical, 4)
+    }
+
+    /// Context windowing: 3 context lines above first change, all changes, 3 below last change.
+    private var windowedLines: [LiveDiffLine] {
+        let visible = block.lines.filter { $0.kind != .hunkHeader }
+        let changeIndices = visible.indices.filter {
+            visible[$0].kind == .addition || visible[$0].kind == .deletion
+        }
+        guard let firstCI = changeIndices.first, let lastCI = changeIndices.last else {
+            // No changes yet (still streaming header) — show up to 6 context lines
+            return Array(visible.prefix(6))
+        }
+        let start = max(0, firstCI - 3)
+        let end = min(visible.count - 1, lastCI + 3)
+        return Array(visible[start...end])
+    }
+
+    // MARK: - Collapsed Pill
+
+    private var collapsedPill: some View {
+        HStack(spacing: StudioSpacing.md) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(StudioColorTokens.Syntax.diffAddition)
+
+            Text("Updated \(block.filename.isEmpty ? "file" : block.filename)")
+                .font(StudioTypography.footnote)
+                .foregroundStyle(StudioTextColor.secondary)
+
+            if block.additionCount > 0 || block.deletionCount > 0 {
+                Text("+\(block.additionCount), -\(block.deletionCount)")
+                    .font(StudioTypography.footnoteSemibold)
+                    .foregroundStyle(StudioTextColor.tertiary)
+            }
+        }
+        .padding(.horizontal, StudioSpacing.xl)
+        .padding(.vertical, 7)
+        .background(
+            Capsule(style: .continuous)
+                .fill(StudioColorTokens.Syntax.diffAddition.opacity(0.08))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(StudioColorTokens.Syntax.diffAddition.opacity(0.28), lineWidth: 0.5)
+        )
+    }
+}
+
+// MARK: - Diff blur-materialize transition helpers
+
+/// Single parameterized modifier so active/identity share the same type, as required
+/// by `AnyTransition.modifier(active:identity:)`.
+private struct DiffBlurModifier: ViewModifier {
+    let radius: CGFloat
+    let opacity: Double
+    func body(content: Content) -> some View {
+        content.blur(radius: radius).opacity(opacity)
+    }
+}
+
+// MARK: - LiveDiffLineRow
+
+private struct LiveDiffLineRow: View {
+
+    let line: LiveDiffLine
+
+    private var sigil: String {
+        switch line.kind {
+        case .addition:  return "+"
+        case .deletion:  return "-"
+        case .context:   return " "
+        case .hunkHeader: return "@@"
+        }
+    }
+
+    private var bgColor: Color {
+        switch line.kind {
+        case .addition:  return StudioColorTokens.Syntax.diffAddition.opacity(0.10) // sheer Volt Mint
+        case .deletion:  return Color(hex: "#4A2B2B")                               // muted red
+        case .context, .hunkHeader: return .clear
+        }
+    }
+
+    private var fgColor: Color {
+        switch line.kind {
+        case .addition:  return StudioColorTokens.Syntax.diffAddition
+        case .deletion:  return StudioColorTokens.Syntax.diffRemoval.opacity(0.60) // desaturated
+        case .context:   return StudioTextColor.secondary.opacity(0.55)
+        case .hunkHeader: return StudioColorTokens.Syntax.diffHeader
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text(sigil)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(fgColor.opacity(0.80))
+                .frame(width: 10, alignment: .leading)
+
+            Text(line.text)
+                .font(StudioTypography.code)
+                .foregroundStyle(fgColor)
+                .strikethrough(line.kind == .deletion, color: fgColor.opacity(0.60))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 2)
+        .background(bgColor)
     }
 }
 
