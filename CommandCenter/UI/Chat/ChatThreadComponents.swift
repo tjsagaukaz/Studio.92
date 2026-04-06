@@ -1115,7 +1115,7 @@ struct StreamingMarkdownRevealView: View {
 
     @State private var revealedCount = 0
     @State private var revealDriverID = UUID()
-    /// Briefly true when new characters land — drives the blur-materialize effect.
+    /// True for exactly one animation frame when a new word lands — drives blur-materialize.
     @State private var isMaterializing = false
 
     var body: some View {
@@ -1126,6 +1126,8 @@ struct StreamingMarkdownRevealView: View {
             tone: tone
         )
         .equatable()
+        // Blur-materialize: new words dissolve in from blur rather than snapping.
+        // Fires per word-boundary advance, not per character — stays performant.
         .blur(radius: isMaterializing ? 2.5 : 0)
         .opacity(isMaterializing ? 0.55 : 1.0)
         .animation(.easeOut(duration: 0.15), value: isMaterializing)
@@ -1146,8 +1148,8 @@ struct StreamingMarkdownRevealView: View {
             revealDriverID = UUID()
         }
         .onChange(of: revealedCount) { _, _ in
-            // Flash-materialize: briefly set true, then immediately clear.
-            // The 0.15s easeOut on isMaterializing creates the dissolve-in.
+            // Word just materialised: set true for 1ms then release.
+            // 0.15s easeOut on the modifier creates the dissolve-in effect.
             isMaterializing = true
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(1))
@@ -1171,6 +1173,7 @@ struct StreamingMarkdownRevealView: View {
         let completedCodeBlocks = Self.completedCodeBlockRanges(in: text)
 
         while revealedCount < targetCount {
+            // ── Code blocks: swallow entire block at once ───────────────
             if let nextBlock = completedCodeBlocks.first(where: {
                 $0.upperBound > revealedCount && $0.lowerBound <= revealedCount
             }) {
@@ -1184,40 +1187,44 @@ struct StreamingMarkdownRevealView: View {
                 .lazy
                 .map(\.lowerBound)
                 .first(where: { $0 > revealedCount })
-            let step: Int
 
-            switch remaining {
-            case 0...24:
-                step = 1
-            case 25...80:
-                step = 2
-            case 81...180:
-                step = 4
-            default:
-                step = 7
-            }
-
-            let unclampedNext = min(revealedCount + step, targetCount)
-            if let nextCodeBlockStart, unclampedNext > nextCodeBlockStart {
-                revealedCount = nextCodeBlockStart
+            // ── Word-boundary advance ───────────────────────────────────
+            // Advance to the end of the next word so each blur-materialize
+            // pulse coincides with a complete word appearing.
+            let wordEnd = Self.nextWordEnd(after: revealedCount, in: text)
+            let candidate = min(wordEnd, targetCount)
+            let safeNext: Int
+            if let nextCodeBlockStart, candidate > nextCodeBlockStart {
+                safeNext = nextCodeBlockStart
             } else {
-                revealedCount = unclampedNext
+                safeNext = candidate
             }
+            revealedCount = safeNext
 
+            // ── Timing: proportional to how far behind we are ──────────
             let sleepMs: UInt64
             switch remaining {
-            case 0...24:
-                sleepMs = 18
-            case 25...80:
-                sleepMs = 14
-            case 81...180:
-                sleepMs = 10
-            default:
-                sleepMs = 8
+            case 0...30:  sleepMs = 40   // near end: slow, deliberate
+            case 31...120: sleepMs = 28
+            case 121...300: sleepMs = 18
+            default:      sleepMs = 10   // catching up: fast
             }
 
             try? await Task.sleep(nanoseconds: sleepMs * 1_000_000)
         }
+    }
+
+    /// Returns the character offset of the end of the next word after `offset`.
+    /// A "word" is any run of non-whitespace characters. Skips leading whitespace first.
+    private static func nextWordEnd(after offset: Int, in text: String) -> Int {
+        var i = text.index(text.startIndex, offsetBy: min(offset, text.count))
+        // skip any leading whitespace
+        while i < text.endIndex && text[i].isWhitespace { text.formIndex(after: &i) }
+        // consume the word
+        while i < text.endIndex && !text[i].isWhitespace { text.formIndex(after: &i) }
+        // consume trailing whitespace so the space arrives with its word
+        while i < text.endIndex && text[i] == " " { text.formIndex(after: &i) }
+        return text.distance(from: text.startIndex, to: i)
     }
 
     private static func completedCodeBlockRanges(in text: String) -> [Range<Int>] {

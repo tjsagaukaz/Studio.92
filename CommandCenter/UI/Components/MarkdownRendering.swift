@@ -110,7 +110,7 @@ struct MarkdownListView: View {
         VStack(alignment: .leading, spacing: StudioSpacing.md) {
             ForEach(items) { item in
                 VStack(alignment: .leading, spacing: StudioSpacing.sm) {
-                    HStack(alignment: .top, spacing: StudioSpacing.lg) {
+                    HStack(alignment: .firstTextBaseline, spacing: StudioSpacing.lg) {
                         ListMarkerView(marker: item.marker, tone: tone)
 
                         MarkdownInlineText(text: item.text, tone: tone)
@@ -128,36 +128,33 @@ struct MarkdownListView: View {
 }
 
 /// Renders the list marker: bullet dot for unordered, .ultraThinMaterial
-/// circular badge with centred number for ordered lists.
+/// circular badge with centred monospaced-digit number for ordered lists.
 private struct ListMarkerView: View {
 
     let marker: MarkdownListItem.Marker
     let tone: MarkdownMessageContent.Tone
 
-    private var badgeSize: CGFloat { tone == .meta ? 16 : 18 }
-    private var fontSize: CGFloat { tone == .meta ? 8 : 9 }
+    private var badgeSize: CGFloat { tone == .meta ? 18 : 22 }
 
     var body: some View {
         switch marker {
         case .unordered:
+            // 4pt dot — sits on the text baseline via .firstTextBaseline on the parent HStack
             Circle()
                 .fill(StudioTextColor.tertiary.opacity(0.45))
                 .frame(width: 4, height: 4)
-                .padding(.top, (badgeSize - 4) / 2 + 2) // vertically align with cap height
+                .padding(.top, 7) // nudge down to optical cap-height alignment
                 .frame(width: badgeSize, alignment: .center)
 
         case .ordered(let n):
-            ZStack {
-                Circle()
-                    .fill(.ultraThinMaterial)
-                Circle()
-                    .stroke(Color.white.opacity(0.10), lineWidth: 0.5)
-                Text("\(n)")
-                    .font(.system(size: fontSize, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(StudioTextColor.secondary)
-            }
-            .frame(width: badgeSize, height: badgeSize)
-            .padding(.top, 1)
+            // .monospacedDigit() keeps multi-digit numbers width-stable so the badge never shifts
+            Text("\(n)")
+                .font(.system(size: 11, weight: .bold).monospacedDigit())
+                .foregroundStyle(Color.primary.opacity(0.80))
+                .frame(width: badgeSize, height: badgeSize)
+                .background(.ultraThinMaterial)
+                .clipShape(Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.10), lineWidth: 0.5))
         }
     }
 }
@@ -246,25 +243,23 @@ private struct InsightCard: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            // 2pt cyan rail
-            RoundedRectangle(cornerRadius: 1, style: .continuous)
+            // 3pt cyan rail — flush with card edge
+            Rectangle()
                 .fill(StudioAccentColor.primary.opacity(0.70))
-                .frame(width: 2)
+                .frame(width: 3)
 
             MarkdownInlineText(text: text, tone: tone)
                 .foregroundStyle(StudioTextColor.secondary)
-                .padding(.horizontal, StudioSpacing.xl)
-                .padding(.vertical, StudioSpacing.lg)
+                .padding(.leading, 12)
+                .padding(.trailing, 16)
+                .padding(.vertical, 12)
         }
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color(hex: "#14181D"))
-        )
+        .background(Color(hex: "#14181D"))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
