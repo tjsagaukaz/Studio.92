@@ -233,7 +233,7 @@ actor TracePersister {
 }
 ```
 
-`@ModelActor` for background writes. `@Model` types in `PersistenceModels.swift`.
+`@ModelActor` for background writes. `@Model` types in `ThreadStorageModels.swift`.
 No ndjson files for structured data — SwiftData provides queryability and migration.
 
 ## Design Token Application
@@ -275,3 +275,72 @@ final class MockSSEProtocol: URLProtocol {
 
 Response types: `.sseEvents`, `.chunkedSSE`, `.byteAtATime`, `.error`.
 Request body is captured for assertion via `MockSSEProtocol.lastRequestBody`.
+
+---
+
+## Extension Guide: Add a New Tool
+
+Checklist for adding a tool to the agentic pipeline:
+
+1. **Define the schema** in `Routing/ToolSchemas.swift` — name, description, input
+   properties, required fields.
+
+2. **Add a case** to the tool dispatch switch in `Tools/ToolDispatch.swift`.
+
+3. **Classify for parallelism** in `Tools/ToolParallelism.swift`:
+   - Read-only? Add to `readOnlyTools` set → runs in parallel.
+   - Mutating? Leave out → runs sequentially by default.
+
+4. **Add guardrail rules** if the tool needs sandbox or permission checks:
+   - `Tools/ToolGuardrails.swift` — `SandboxPolicy` for path-based tools.
+   - `ToolPermissionPolicy` — which autonomy modes block this tool?
+
+5. **Add a result view** in `Tools/ToolResultViews.swift` for inline rendering
+   in the chat thread.
+
+6. **Wire telemetry** — ensure `ToolDispatch` emits a trace span wrapping the call.
+
+7. **Test** — add a case to `PipelineIntegrationTests` that mocks an LLM response
+   containing a tool_use block for the new tool, then assert the result.
+
+## Extension Guide: Add a New Execution Loop
+
+Checklist for supporting a new LLM provider:
+
+1. **Create a loop adapter** in `Execution/Loops/` (e.g., `GeminiExecutionLoop.swift`).
+   Conform to the same interface as `AnthropicExecutionLoop` / `OpenAIExecutionLoop`.
+
+2. **Create a stream handler** in `Execution/Streaming/` (e.g., `GeminiStreamHandler.swift`).
+   Must be delimiter-driven — no fixed-buffer assumptions.
+
+3. **Register the provider** in `Bridge/AgenticBridge.swift` — add a case to the
+   provider routing logic.
+
+4. **Add a model descriptor** in `Routing/ModelRouting.swift` —
+   `StudioModelProvider` enum case + `StudioModelDescriptor` entry.
+
+5. **Add to ship.toml** — new model IDs under `[models]` for any role the provider
+   should serve.
+
+6. **Test** — add `MockSSEServer` response fixtures that mimic the provider's wire
+   format. Add at least: normal delivery, chunked, and error cases.
+
+---
+
+## Key Files
+
+| Pattern | Primary File | Path |
+|---------|-------------|------|
+| Actor state | TraceCollector | `Diagnostics/TraceStore.swift` |
+| @Observable | ConversationStore | `Persistence/ConversationStore.swift` |
+| Coordinator extraction | WorkspaceCoordinator | `Workspace/WorkspaceCoordinator.swift` |
+| Pipeline FSM | StreamPipeline | `Execution/Pipeline/StreamPipeline.swift` |
+| Error taxonomy | ToolError | `Tools/ToolError.swift` |
+| Read/write partition | ToolParallelism | `Tools/ToolParallelism.swift` |
+| Typed handoffs | HandoffExecutor | `Execution/HandoffExecutor.swift` |
+| SSE streaming | AnthropicStreamHandler | `Execution/Streaming/AnthropicStreamHandler.swift` |
+| Process timeout | GitFoundation | `Workspace/GitFoundation.swift` |
+| ship.toml config | ModelRouting | `Routing/ModelRouting.swift` |
+| SwiftData | ThreadStorageModels | `Persistence/ThreadStorageModels.swift` |
+| Design tokens | StudioColorTokens | `Studio/StudioColorTokens.swift` |
+| Integration tests | PipelineIntegrationTests | `IntegrationTests/PipelineIntegrationTests.swift` |

@@ -13,7 +13,7 @@ ArchitectureValidator at runtime and by review at PR time.
    a single event can arrive across multiple TCP segments. Tested by byte-at-a-time and
    split-boundary integration tests.
 
-3. **No direct tool calls outside AgenticToolDispatch.** All tool execution routes through
+3. **No direct tool calls outside ToolDispatch.** All tool execution routes through
    the dispatch layer, which enforces guardrails, parallelism rules, and tracing.
 
 4. **Tool parallelism respects read/write semantics.** Reads (file_read, list_files,
@@ -82,7 +82,7 @@ ArchitectureValidator at runtime and by review at PR time.
 
 18. **SwiftData for queryable storage.** Traces use `PersistedSpan` (@Model) +
     `TracePersister` (@ModelActor). Threads and messages use `@Model` types in
-    `PersistenceModels.swift`. No ndjson files for structured data.
+    `ThreadStorageModels.swift`. No ndjson files for structured data.
 
 19. **Thread persistence is coordinator-mediated.** All thread CRUD goes through
     `ThreadPersistenceCoordinator`. No direct `modelContext` access from views.
@@ -126,3 +126,86 @@ ArchitectureValidator at runtime and by review at PR time.
 28. **Live research for shipping decisions.** Any decision that depends on current Apple
     SDK behavior, App Store Review Guidelines, privacy manifests, or entitlements must
     use live web research. Apple docs first, then broader search.
+
+---
+
+## Violation Examples
+
+Concrete ❌/✅ pairs for each rule category to clarify intent.
+
+### Execution
+❌ A view calls `AgenticBridge.sendMessage()` directly to get a quick response.
+✅ The view submits a goal through `WorkspaceCoordinator` → `PipelineRunner` → `ExecutionLoopEngine`.
+
+❌ SSE parser splits events on `content-length` header or 4096-byte chunks.
+✅ SSE parser splits on `\n\n` delimiter, buffering across arbitrary TCP segments.
+
+### Routing
+❌ `PipelineRunner` hardcodes `"claude-opus-4-6"` for escalation.
+✅ `PipelineRunner` calls `routingDecision(context:)` which reads the model from `ship.toml`.
+
+❌ A plan adaptation reroutes from Sonnet → Opus → Sonnet in the same plan.
+✅ Adaptation is rejected because target equals a previous role (anti-oscillation guard).
+
+### Guardrails
+❌ `file_write` handler writes the file, then checks `SandboxPolicy`.
+✅ `SandboxPolicy.check(path:)` gates the operation before any filesystem mutation.
+
+❌ An explorer handoff creates its own `ToolPermissionPolicy(mode: .fullSend)`.
+✅ Explorer handoff inherits the parent's sandbox + `ToolPermissionPolicy(mode: .review)`.
+
+### Concurrency
+❌ Adding `nonisolated` to a `TraceCollector` method that reads `spans`.
+✅ All methods that touch mutable actor state remain actor-isolated.
+
+❌ Running `Process.waitUntilExit()` inside an `@MainActor` method.
+✅ Process execution runs in `Task.detached` with timeout.
+
+### UI
+❌ `Text("Error").foregroundColor(.red).font(.system(size: 14))`
+✅ `Text("Error").foregroundStyle(StudioColorTokens.error).font(StudioTypography.caption)`
+
+---
+
+## When to Break a Rule
+
+Rules are defaults, not absolutes. Break them when:
+
+1. **Prototyping a new subsystem.** Skip guardrails and routing for throwaway spikes.
+   Delete the spike before merging.
+
+2. **Hot-path performance.** If `SandboxPolicy.check()` is profiled as a bottleneck in
+   a tight loop, batch the check outside the loop. Document with a `// PERF:` comment.
+
+3. **Apple SDK requires it.** If a new API demands main-thread access that violates
+   rule 16, add `@MainActor` with a `// APPLE:` comment linking to the documentation.
+
+4. **Test code.** Test helpers may call tools directly (bypassing ToolDispatch) or use
+   inline model IDs. Production code must not.
+
+5. **Ship-blocking emergency.** If a rule blocks a release, break it with a comment
+   `// DEBT: rule N violated — tracking in issue #NNN` and file the issue immediately.
+
+**Process:** When breaking a rule, add a comment at the call site citing the rule number
+and the justification. ArchitectureValidator will still flag it — suppress with
+`@ArchitectureValidator.suppress(ruleN)` if supported, otherwise note in the PR.
+
+---
+
+## Key Files
+
+| Rule Category | Primary File | Path |
+|---------------|-------------|------|
+| Execution loops | ExecutionLoopEngine | `Execution/Loops/ExecutionLoopEngine.swift` |
+| Streaming | AnthropicStreamHandler | `Execution/Streaming/AnthropicStreamHandler.swift` |
+| Tool dispatch | ToolDispatch | `Tools/ToolDispatch.swift` |
+| Tool parallelism | ToolParallelism | `Tools/ToolParallelism.swift` |
+| Guardrails | ToolGuardrails | `Tools/ToolGuardrails.swift` |
+| Recovery | ToolError | `Tools/ToolError.swift` |
+| Routing | ModelRouting | `Routing/ModelRouting.swift` |
+| Plan engine | TaskPlanEngine | `Routing/TaskPlanEngine.swift` |
+| Handoffs | HandoffExecutor | `Execution/HandoffExecutor.swift` |
+| Sandbox | ToolGuardrails | `Tools/ToolGuardrails.swift` |
+| Persistence | ThreadStorageModels | `Persistence/ThreadStorageModels.swift` |
+| Design tokens | StudioColorTokens | `Studio/StudioColorTokens.swift` |
+| Architecture validator | ArchitectureValidator | `Diagnostics/ArchitectureValidator.swift` |

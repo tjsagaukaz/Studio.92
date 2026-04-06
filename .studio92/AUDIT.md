@@ -1,346 +1,261 @@
-# Studio.92 CommandCenter — Comprehensive Architectural Audit
-**Date:** April 5, 2026 | **Grade: B−** | **Files analyzed:** ~54 Swift, ~24K+ LOC (CC) + ~5K LOC (SPM)
+# Studio.92 CommandCenter — Architectural Audit
+
+**Last updated:** April 7, 2026 | **Grade: B+** | **Audited:** 109 Swift files, ~58K LOC total
 
 ---
 
 ## 1. Executive Summary
 
-**Codebase size:** ~54 Swift files, ~24,000+ lines in CommandCenter, plus a parallel ~5,000-line SPM framework (`AgentCouncil` + `Executor`) that CommandCenter **does not import** — maintaining shadow copies instead.
+**Codebase:** 76 Swift files in CommandCenter (~48K LOC), 24 in SPM framework (~7K LOC),
+9 test files (~3.3K LOC across CC integration tests and SPM unit tests).
 
-**Overall assessment: B−.** The architecture has strong bones — actors for concurrency isolation, `@Observable` for state, a real streaming pipeline, structured tracing, and a layered tool execution model. These are the right choices. But execution quality is inconsistent. The codebase has been built at feature velocity, and it shows: God Object views with 25+ state properties, unbounded memory growth in 7+ subsystems, missing timeouts on every external process call, and a critical source-of-truth split between the SPM framework and CommandCenter's local copies.
+**Overall: B+** (up from B− on April 5). The architecture was always sound — actors for
+concurrency, `@Observable` for state, structured streaming, layered tool execution. What's
+changed is execution quality. The God Object view was split into coordinators.
+AgenticBridge was decomposed from 3,500 to 545 LOC. Process timeouts were added everywhere.
+A context-aware model routing system with capability matching replaced keyword classification.
+Integration test infrastructure was built from scratch (37 CC tests, 150 SPM tests). The
+codebase was reorganized from 76 flat files into 10 domain-based folders. An AI context
+layer (ARCHITECTURE.md, rules.md, routing.md, patterns.md) now makes the system
+self-describing.
 
-**Ship-blocking issues:** 4  
-**High-risk issues:** 9  
-**Medium-risk issues:** 14  
-**The codebase is trending toward** maintainable-but-fragile. It needs targeted structural work now — not a rewrite, but specific extractions — before the next feature layer makes the God Objects permanent.
-
----
-
-## 2. Architecture Map
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    CommandCenterApp.swift                        │
-│                    (entry point, Settings)                       │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────────┐
-│                CommandCenterView.swift (~1200 LOC)               │
-│  ⚠️ GOD OBJECT: 25+ @State, 20+ callbacks, 6 responsibilities  │
-│  Owns: project selection, thread persistence, conversation      │
-│        management, workspace switching, goal submission          │
-└─────┬──────────┬──────────┬──────────┬──────────┬───────────────┘
-      │          │          │          │          │
-┌─────▼────┐ ┌──▼───────┐ ┌▼────────┐ ┌▼───────┐ ┌▼──────────────┐
-│FleetSidebar│ │Workspace │ │Execution│ │Viewport│ │SessionInspector│
-│  (~900)    │ │ShellView │ │PaneView │ │PaneView│ │    View        │
-│  18 props  │ │  (~60)   │ │ (~1400) │ │ (~650) │ │   (~700)       │
-└────────────┘ └──────────┘ └────┬────┘ └────────┘ └────────────────┘
-                                 │
-                    ┌────────────▼────────────┐
-                    │ ChatThreadComponents    │
-                    │      (~2100 LOC)        │
-                    │ ConversationTurnRow,     │
-                    │ StreamingMarkdownReveal, │
-                    │ InlineToolTraceGroup     │
-                    └─────────────────────────┘
-
-┌─── STREAMING ENGINE ──────────────────────────────┐
-│ StreamPipeline.swift (~1270)                       │
-│   StreamPhaseController (8-state FSM)              │
-│   SemanticEventTransformer                         │
-│   NarrativeChunker (actor)                         │
-│ StreamRendering.swift (~700)                       │
-│   StreamPhaseRenderer (phase-driven view switch)   │
-└──────────────┬────────────────────────────────────┘
-               │
-┌──────────────▼────────────────────────────────────┐
-│ AgenticBridge.swift (~3500 LOC) ⚠️ MEGA ACTOR     │
-│   AgenticClient (actor) — full agentic loop       │
-│   Anthropic + OpenAI streaming                    │
-│   Tool dispatch (9 tools inline)                  │
-│   CodexTerminalCoordinator, FastlaneDeployment    │
-└──────────────┬────────────────────────────────────┘
-               │
-┌──────────────▼─────────┐  ┌────────────────────────┐
-│ Tool Layer             │  │ Recovery Layer          │
-│ ToolParallelism (~80)  │  │ ToolError.swift (~180)  │
-│ ToolGuardrails (~130)  │  │ RecoveryExecutor (actor)│
-│ ToolCallComponents(800)│  │ ⚠️ No tracer (CC copy)  │
-└────────────────────────┘  └────────────────────────┘
-
-┌─── INFRASTRUCTURE ─────────────────────────────────┐
-│ Models.swift (~2574) — SwiftData models, stores    │
-│ GitFoundation.swift (~1000) — git actor            │
-│ JobFoundation.swift (~700) — background jobs       │
-│ CompactionCoordinator (~400) — context compression │
-│ TaskPlanEngine (~600) — execution planning         │
-│ HandoffExecutor (~200) — subagent delegation       │
-│ SimulatorPreviewService (~900) — device management │
-└────────────────────────────────────────────────────┘
-
-┌─── OBSERVABILITY ──────────────────────────────────┐
-│ AgentTrace.swift (~300) — spans, TraceCollector     │
-│ TraceStore.swift (~250) — SwiftData persistence     │
-│ ArchitectureValidator (~250) — runtime invariants   │
-│ LatencyDiagnostics (~450) — timing instrumentation  │
-│ TelemetryIngestor — event ingestion                 │
-└────────────────────────────────────────────────────┘
-
-┌─── SPM FRAMEWORK (NOT IMPORTED BY CC) ─────────────┐
-│ Sources/AgentCouncil/ (~4000 LOC)                   │
-│   API/, Orchestrator/, Guardrails/, Handoffs/,      │
-│   Recovery/, Tracing/, Personas/, Manifest/          │
-│ Sources/Executor/ (~900 LOC) — GPT-5.4 build repair │
-│ ⚠️ SHADOW COPIES in CC: ToolError, ToolGuardrails,  │
-│    HandoffExecutor, AgentTrace                       │
-└────────────────────────────────────────────────────┘
-```
+**Ship-blocking:** 1 (was 4, 3 fixed)
+**High-risk:** 4 (was 9, 5 fixed or mitigated)
+**Medium-risk:** 12 (was 14, 2 fixed)
+**Trending:** solidly maintainable
 
 ---
 
-## 3. Critical Issues (Ship-Blocking)
+## 2. What Changed (April 5 → April 7)
 
-### C1. CommandCenterView is a God Object
-**File:** `CommandCenter/CommandCenterView.swift`  
-**Impact:** Every feature added increases coupling. Refactoring becomes exponentially harder.
+### Critical Fixes
+| Issue | Before | After |
+|-------|--------|-------|
+| C1. CommandCenterView God Object | 1,200 LOC, 25+ @State | 794 LOC, extracted WorkspaceCoordinator (166 LOC) + ThreadCoordinator (380 LOC) |
+| C2. AgenticBridge Mega Actor | 3,500 LOC, untestable | 545 LOC — AnthropicExecutionLoop, OpenAIExecutionLoop, stream handlers extracted |
+| C4. Missing process timeouts | None on any external call | Git 30s, Simulator 60s, Fastlane 600s — terminate→grace→SIGKILL |
 
-~1,200 lines, 25+ `@State` properties, 20+ closures passed to children. Owns 6 distinct responsibilities: project selection, thread persistence, conversation management, workspace switching, goal submission, and epoch/session lifecycle. A single `selectWorkspace()` modifies 8 properties with no rollback. `submitGoal()` is async but clears input state synchronously (race condition if user types during submission).
-
-**Fix:** Extract `WorkspaceCoordinator` (observable class) for workspace + project state, `ThreadCoordinator` for thread persistence/rehydration, and `ConversationCoordinator` for message submission. CommandCenterView becomes a <200-line layout shell.
-
-### C2. AgenticBridge.swift is a 3,500-line Mega Actor
-**File:** `CommandCenter/AgenticBridge.swift`  
-**Impact:** Untestable, un-navigable, and un-auditable. Every tool, every API provider, every retry path lives in one actor.
-
-Contains: Anthropic streaming, OpenAI streaming with model fallback cascade, SSE parsing, UTF-8 stream decoding, all 9 tool implementations inline, terminal recovery, vision payload encoding, Fastlane deployment, and researcher subprocess orchestration. No cancellation hook for in-flight HTTP streams. Retry has no jitter (thundering herd risk). Tool classification uses fragile `string.contains()`.
-
-**Fix:** Split into `AnthropicStreamHandler`, `OpenAIStreamHandler`, `ToolDispatcher` (with per-tool handler protocol), and `StreamDecoder`. Keep `AgenticClient` as a thin router.
-
-### C3. SPM/CC Source-of-Truth Split
-**Files:** `CommandCenter/ToolError.swift`, `CommandCenter/ToolGuardrails.swift`, `CommandCenter/HandoffExecutor.swift`, `CommandCenter/AgentTrace.swift` (CC copies) vs. `Sources/AgentCouncil/` originals  
-**Impact:** CC's `RecoveryExecutor` has **no tracer integration** — retries and escalations are invisible. Guardrails are 100% duplicated. Handoff prompts will drift.
-
-CommandCenter does not import AgentCouncil. It maintains local copies of 4 critical files, with the CC versions degraded (missing tracer calls, different access levels). A comment in HandoffExecutor explicitly warns "prompts must be kept in sync."
-
-**Fix:** Make CommandCenter import AgentCouncil as a local package dependency. Remove CC shadow copies. Extend `SpanKind` in CC for `.compaction` and `.architectureViolation` via extension.
-
-### C4. ~~Missing Timeouts on All External Processes~~ ✅ FIXED (Sprint 1)
-**Files:** `CommandCenter/GitFoundation.swift`, `CommandCenter/SimulatorPreviewService.swift`, `CommandCenter/AgenticBridge.swift`  
-**Status:** Fixed. 30s timeout on git (runGit), 60s timeout on simulator (runCommand), 600s timeout on Fastlane runner. All use terminate → grace period → SIGKILL pattern. Also fixed: invalid top-level `cache_control` on Anthropic request body removed (2 locations).
+### Structural Improvements
+| What | Impact |
+|------|--------|
+| Folder reorganization | 76 flat files → 10 domain folders (App, Bridge, Diagnostics, Execution, Persistence, Routing, Studio, Tools, UI, Workspace) |
+| File rename pass | 9 files renamed for clarity (ToolDispatch, PipelineStepRouter, ConversationStore, etc.) |
+| Phase 1: RoutingContext | 7-level priority cascade for model selection |
+| Phase 2: Adaptive Plan Execution | DAG-based task planning with anti-oscillation guards |
+| Phase 3: Cost-Aware Routing | TaskCapability matching, ModelCostProfile, per-step model selection |
+| Integration tests | MockSSEServer (URLProtocol), 37 CC tests (streaming, routing, recovery, tracing) |
+| CI/CD | GitHub Actions: SPM build+test → Xcode build, SwiftLint, caching |
+| AI context layer | ARCHITECTURE.md, .studio92/rules.md, routing.md, patterns.md |
 
 ---
 
-## 4. High-Risk Issues
+## 3. Remaining Issues
 
-| # | Issue | File | Fix |
-|---|-------|------|-----|
-| H1 | Infinite retry loop | JobFoundation ~L530 | Add 60s cumulative timeout |
-| H2 | Unbounded memory growth (7 subsystems) | Multiple | Size caps, circular buffers, pruning |
-| H3 | Main thread blocking | SimulatorPreviewService.runCommand() | Move to Task.detached with timeout |
-| H4 | Debounce task leaks | ExecutionPaneView | Cancel pendingStageTask in onDisappear |
-| H5 | ScrollView reader race | ChatThreadComponents | Debounce scroll-to-bottom |
-| H6 | O(n²) streaming reveal | StreamingMarkdownRevealView | Batch 10 chars at a time |
-| H7 | No cycle detection | TaskPlanEngine | Add cycle detection before execution |
-| H8 | Phase deadlock | CompactionCoordinator | Auto-reset .optimizing after 120s |
-| H9 | Unbounded retry backoff | ToolError RecoveryExecutor | Add jitter, enforce ceiling |
+### Ship-Blocking (1)
 
-### Unbounded Memory Growth Details
-| Source | What grows | Bound |
-|--------|-----------|-------|
-| `GitFoundation.readAll()` | Git command output | ~~None~~ ✅ Capped at 10 MB |
-| `SessionInspectorModel` | Span array | None — rebuildSummary() per span |
-| `LatencyDiagnostics` | Stages/points/llmCalls arrays | None |
-| `TraceCollector` | Continuations array | ~~None~~ ✅ Fixed — onTermination cleanup |
-| `AgentTrace` | Active spans (never timeout) | None |
-| `JobFoundation` | Event log before trim | Spikes to N before trimming to 80 |
-| `SimulatorPreviewService` | Screenshot files in /tmp | None |
+**C3. SPM/CC Source-of-Truth Split** — CommandCenter does not import AgentCouncil. Shadow
+copies of ToolError (missing tracer), ToolGuardrails (100% duplication), HandoffExecutor
+(different arch), AgentTrace (CC extends SpanKind). RecoveryExecutor in CC has no tracer.
+Fix: import AgentCouncil as local package dependency.
 
----
+### High-Risk (4)
 
-## 5. Medium-Risk Issues
+| # | Issue | File | Status |
+|---|-------|------|--------|
+| H1 | Infinite retry in JobFoundation.persist() | `Workspace/JobFoundation.swift` ~L530 | Open — add 60s cumulative timeout |
+| H2 | Unbounded memory (5 remaining) | Multiple | Partial — GitFoundation ✅ capped, TraceCollector ✅ fixed. Remaining: SessionInspectorModel spans, LatencyDiagnostics arrays, AgentTrace active spans |
+| H5 | ScrollView reader race | `UI/Chat/ChatThreadComponents.swift` | Open — multiple rapid onChange cascades |
+| H6 | O(n²) streaming reveal | `UI/Chat/ChatThreadComponents.swift` | Open — per-character async tasks |
+
+### Resolved High-Risk
+- ~~H3. Main thread blocking~~ ✅ SimulatorPreviewService uses Task.detached
+- ~~H4. Debounce task leaks~~ ✅ ExecutionPaneView cancels tasks in onDisappear
+- ~~H7. No plan cycle detection~~ ✅ Deadlock detection in executor loop, adaptation cap (3)
+- ~~H8. CompactionCoordinator deadlock~~ ✅ Watchdog added
+- ~~H9. Unbounded retry backoff~~ ✅ ±25% jitter + 12s cap confirmed
+
+### Medium-Risk (12)
 
 | # | Issue | File | Impact |
 |---|-------|------|--------|
-| M1 | Fragile tool classification via `string.contains()` | StreamPipeline | Wrong tool type → wrong streaming phase |
-| M2 | Case-sensitive plan detection | StreamPipeline | LLM output variance breaks plan parsing |
-| M3 | Filesystem walk (6 levels) on every CodeBlockCard render | MarkdownRendering | Perf drag on chat with many code blocks |
-| M4 | `ativeRenderer` sentence splitting breaks on abbreviations | NarrativeRenderer | "Dr. Smith" split into two sentences |
-| M5 | `ToolParallelism` whitelist excludes `web_fetch` | ToolParallelism | Legitimate parallel reads run sequentially |
-| M6 | Sandbox check sometimes happens AFTER file operation | ToolGuardrails | Security gap: write-then-check ordering |
-| M7 | `ArchitectureValidator` violations persist only in memory | ArchitectureValidator | App crash loses all violation history |
-| M8 | Latency reports exported to hardcoded `/tmp` path | LatencyDiagnostics | Accumulates files forever |
-| M9 | `CoreSceneController` array mutation during render | CoreSceneController | SceneKit threading crash risk |
-| M10 | `ViewportStreamModel` silently ignores illegal transitions | ViewportStreamModel | Caller has no idea request was rejected |
-| M11 | `AGENTSParser` silently degrades on parse failure | AGENTSParser | Config issues invisible to user |
-| M12 | `ClaudeAPIClient` no Anthropic error classification | ClaudeAPIClient (SPM) | Can't distinguish rate-limit from auth failure |
-| M13 | `ExecutorAgent` has no `Task.isCancelled` checks | ExecutorAgent (SPM) | UI can't interrupt build repair loops |
-| M14 | Thread persistence optional everywhere; no rollback | CommandCenterView | Inconsistent state if persistence fails mid-op |
+| M1 | Fragile tool classification via string.contains() | `Execution/Pipeline/StreamPipeline.swift` | Wrong tool type → wrong streaming phase |
+| M2 | Case-sensitive plan detection | `Execution/Pipeline/StreamPipeline.swift` | LLM output variance breaks parsing |
+| M3 | Filesystem walk (6 levels) per CodeBlockCard | `UI/Components/MarkdownRendering.swift` | Perf drag on chat with many code blocks |
+| M4 | Sentence splitting breaks on abbreviations | `UI/Components/NarrativeRenderer.swift` | "Dr. Smith" split into two sentences |
+| M5 | ToolParallelism whitelist excludes web_fetch | `Tools/ToolParallelism.swift` | Legitimate parallel reads run sequentially |
+| M6 | Sandbox check sometimes AFTER file op | `Tools/ToolGuardrails.swift` | Security gap: write-then-check |
+| M8 | Latency reports to hardcoded /tmp | `Diagnostics/LatencyDiagnostics.swift` | Accumulates files forever |
+| M9 | CoreSceneController array mutation during render | `App/CoreSceneController.swift` | SceneKit threading crash risk |
+| M10 | ViewportStreamModel ignores illegal transitions | `UI/Layout/ViewportStreamModel.swift` | Caller unaware request rejected |
+| M11 | AGENTSParser silently degrades | `Routing/AGENTSParser.swift` | Config issues invisible |
+| M12 | ClaudeAPIClient no error classification | `Sources/AgentCouncil/API/` | Can't distinguish rate-limit vs auth |
+| M14 | Thread persistence optional, no rollback | `Persistence/ThreadCoordinator.swift` | Inconsistent state on failure |
+
+### Resolved Medium-Risk
+- ~~M7. ArchitectureValidator violations memory-only~~ ✅ Persisted to JSON in Application Support
+- ~~M13. ExecutorAgent no cancellation~~ ✅ TaskPlanExecutor has Task.isCancelled + deadlock detection
 
 ---
 
-## 6. Spaghetti Risk Audit
+## 4. Current Architecture Map
 
-### Prop Threading Depth
 ```
-CommandCenterView (25+ @State)
-  → WorkspaceShellView (pass-through, 15 props)
-    → ExecutionPaneView (15 props, 7+ local @State)
-      → ChatThreadView (12 props)
-        → ConversationTurnRow (8 props)
-          → InterleavedTurnContentView
-            → InlineToolTraceGroup
+CommandCenter/
+├── App/                    Entry point + root view (794 LOC)
+│   ├── CommandCenterApp        @main, Settings, SwiftData container
+│   ├── CommandCenterView       Layout shell with coordinator delegates
+│   └── CoreSceneController     SceneKit 3D visualization
+│
+├── Bridge/                 Provider adapters (545 LOC bridge)
+│   ├── AgenticBridge           Actor — Anthropic + OpenAI API clients
+│   ├── AgenticBridgeTypes      Shared bridge types
+│   └── MultimodalEngine        Image/vision payload construction
+│
+├── Execution/              Agentic loop + streaming (13 files)
+│   ├── CompactionCoordinator   Context window management (670 LOC)
+│   ├── HandoffExecutor         Typed subagent delegation
+│   ├── LiveStateEngine         Real-time execution state
+│   ├── Loops/
+│   │   ├── ExecutionLoopEngine     Provider-agnostic loop
+│   │   ├── AnthropicExecutionLoop  Anthropic adapter
+│   │   └── OpenAIExecutionLoop     OpenAI adapter
+│   ├── Pipeline/
+│   │   ├── PipelineRunner          Orchestrates full execution cycle
+│   │   ├── PipelineStepRouter      DAG step routing + telemetry
+│   │   ├── StreamPipeline          8-state FSM (1,606 LOC)
+│   │   ├── StreamRendering         Phase-driven view switching
+│   │   └── StreamingTextBuffer     Incremental text accumulation
+│   └── Streaming/
+│       ├── AnthropicStreamHandler  SSE → byte → UTF8 → events
+│       └── OpenAIStreamHandler     JSON-lines streaming
+│
+├── Routing/                Model selection + planning (4 files)
+│   ├── ModelRouting            RoutingContext, RoutingDecision, capabilities (880 LOC)
+│   ├── TaskPlanEngine          DAG planner + executor (950 LOC)
+│   ├── AGENTSParser            AGENTS.md model role extraction
+│   └── ToolSchemas             JSON schema definitions
+│
+├── Tools/                  Tool execution layer (6 files)
+│   ├── ToolDispatch            Per-tool routing
+│   ├── ToolGuardrails          SandboxPolicy + ToolPermissionPolicy
+│   ├── ToolParallelism         Read/write partitioning, TaskGroup
+│   ├── ToolResultViews         UI for tool call results
+│   ├── StatefulTerminalEngine  Persistent terminal sessions
+│   └── CodexTerminalCoordinator Terminal lifecycle management
+│
+├── Persistence/            SwiftData + conversation state (5 files)
+│   ├── ConversationStore       @Observable in-memory conversation
+│   ├── ThreadStorageModels     SwiftData @Model types
+│   ├── ThreadCoordinator       Thread lifecycle (380 LOC)
+│   ├── ThreadPersistenceCoordinator  SwiftData read/write
+│   └── ThreadTitleGenerator    LLM-powered title generation
+│
+├── Diagnostics/            Observability (6 files)
+│   ├── TraceStore              PersistedSpan + TracePersister
+│   ├── TelemetryIngestor       Event aggregation
+│   ├── ArchitectureValidator   Runtime invariant checking
+│   ├── BuildDiagnostics        Xcode output parsing
+│   ├── LatencyDiagnostics      Timing instrumentation
+│   └── MemoryHardening         Memory pressure detection
+│
+├── Studio/                 Design system (7 files)
+│   ├── StudioColorTokens       Accent #1CD1FF, semantic palette
+│   ├── StudioTypography        Geist font family
+│   ├── StudioMotion            Animation curves
+│   ├── StudioPolish            Radii, shadows, blur
+│   ├── StudioFeedback          Haptic/visual feedback
+│   ├── StudioInsightEngine     Insight aggregation
+│   └── StudioAutomationEngine  Automation preferences
+│
+├── UI/                     Views (21 files)
+│   ├── Chat/                   ConversationDetailViews, ChatThreadComponents, ComposerViews
+│   ├── Components/             ArtifactViews, CodeDiffEngine, ChatContextHeader,
+│   │                           LiveActivityViews, MarkdownRendering, NarrativeRenderer
+│   ├── Inspector/              SessionInspectorModel, SessionInspectorView
+│   └── Layout/                 Dashboard, ExecutionPane, ExecutionTree, FleetSidebar,
+│                               ViewportPane, ViewportStreamModel, VolumetricCore,
+│                               WorkspaceBackground, WorkspaceShell, WorktreeJobViews
+│
+├── Workspace/              Git, jobs, deployment (8 files)
+│   ├── GitFoundation           Git actor (998 LOC)
+│   ├── JobFoundation           Background jobs (839 LOC)
+│   ├── WorkspaceCoordinator    Workspace state (166 LOC, extracted from view)
+│   ├── RepositoryMonitor       @Observable git state
+│   ├── DeploymentCoordinator   TestFlight/App Store flows
+│   ├── FactoryObserver         Factory subprocess monitoring
+│   ├── SessionTemplateEngine   Session template rendering
+│   └── SimulatorPreviewService Device management
+│
+└── IntegrationTests/       37 tests
+    ├── PipelineIntegrationTests  SSE, routing, recovery, tracing
+    └── MockSSEServer             URLProtocol-based mock
 ```
-**6 levels deep, 15+ props at the widest point.** This is the ceiling for manual prop threading.
-
-### Coupling Hotspots
-| File | Incoming refs | Outgoing refs | Score |
-|------|--------------|--------------|-------|
-| CommandCenterView | 0 (root) | 18 | Extreme out-coupling |
-| Models.swift | ~30 | 3 | High in-coupling (fine for model layer) |
-| AgenticBridge | 1 (runner) | 12 | High out-coupling |
-| StreamPipeline | 2 | 5 | Moderate |
-| GitFoundation | 3 | 0 | Clean |
-
-### Verdict
-**Not spaghetti yet, but one layer away.** The prop threading is at its limit. The God Object pattern in CommandCenterView is the primary risk — it's where spaghetti will emerge first because every new feature adds another `@State` + callback pair.
 
 ---
 
-## 7. UI & Rendering Audit
-
-### Chat Rendering Pipeline
-```
-ConversationStore (turns/blocks)
-  → ChatThreadView (ScrollViewReader + ForEach)
-    → ConversationTurnRow (role-based dispatch)
-      → InterleavedTurnContentView (text + tool blocks interleaved)
-        → MarkdownMessageContent (block parser → headings/lists/code/quotes)
-        → StreamingMarkdownRevealView (character-by-character animation)
-        → InlineToolTraceGroup (collapsible tool activity)
-        → CodeBlockCard (syntax highlight + diff + apply-to-file)
-```
-
-**Strengths:**
-- Structured block model (not just raw text) — handles mixed text/tool/thinking content
-- Design token system fully wired (StudioTypography, StudioColorTokens, StudioPolish)
-- Phase-driven streaming UI with 8-state FSM
-
-**Weaknesses:**
-- Markdown parser has no error recovery or nesting depth limit
-- StreamingMarkdownRevealView does per-character async tasks (O(n²))
-- CodeBlockCard walks filesystem 6 levels up on every render
-- ConversationTurnListItem.Equatable compares 10 fields — any change rerenders entire turn
-
----
-
-## 8. State Model Audit
+## 5. State Model
 
 | Layer | Owner | Pattern | Quality |
 |-------|-------|---------|---------|
-| App-wide projects/threads | CommandCenterView | 25+ @State | **GOD OBJECT** |
-| Conversation turns | ConversationStore | @MainActor @Observable | Good |
-| Streaming phase | StreamPhaseController | @MainActor @Observable FSM | Good |
-| Viewport content | ViewportStreamModel | @MainActor @Observable FSM | Good |
-| Repository state | RepositoryMonitor | @MainActor @Observable | Good |
-| Background jobs | JobMonitor | @MainActor @Observable | Good |
-| Tracing | TraceCollector | Actor | Good |
-| Latency | LatencyDiagnostics | Actor | Good |
-| Automation prefs | AutomationPreferenceStore | @MainActor .shared | Good |
-
-**Right patterns in use.** Problem is CommandCenterView holding state that should be in coordinators.
-
----
-
-## 9. Observability & Debugging Audit
-
-### What's Instrumented
-- Tracing: TraceCollector + TracePersister (8 span kinds, AsyncStream subscribers, summary stats)
-- Latency: LatencyDiagnostics (stage times, LLM metrics, tool loop durations)
-- Architecture: ArchitectureValidator (8 violation kinds, runtime)
-- Telemetry: TelemetryIngestor for event ingestion
-
-### What's NOT Instrumented
-- CC RecoveryExecutor has NO tracer (SPM version does)
-- ExecutorAgent (GPT-5.4 build repair) has NO tracer
-- No span timeout detection (begun but never ended = memory forever)
-- Architecture violations lost on app restart
-- Latency exports to /tmp with no UI and no cleanup
-- No error rate dashboards
+| App-wide workspace | WorkspaceCoordinator | @MainActor @Observable | ✅ Good (extracted) |
+| Thread lifecycle | ThreadCoordinator | @MainActor @Observable | ✅ Good (extracted) |
+| Conversation turns | ConversationStore | @MainActor @Observable | ✅ Good |
+| Streaming phase | StreamPhaseController | @MainActor @Observable FSM | ✅ Good |
+| Viewport content | ViewportStreamModel | @MainActor @Observable FSM | ✅ Good |
+| Repository state | RepositoryMonitor | @MainActor @Observable | ✅ Good |
+| Background jobs | JobMonitor | @MainActor @Observable | ✅ Good |
+| Tracing | TraceCollector | Actor | ✅ Good |
+| Latency | LatencyDiagnostics | Actor | ✅ Good |
+| Recovery | RecoveryExecutor | Actor + CircuitBreaker | ✅ Good |
+| Routing | ModelRouting | Pure functions + ship.toml | ✅ Good |
 
 ---
 
-## 10. Prioritized Fix Order
+## 6. Test Coverage
 
-### Tier 0: Do Now (Before Next Feature)
-1. ~~**Add timeouts to all Process calls**~~ ✅ — GitFoundation (30s), SimulatorPreviewService (60s), AgenticBridge Fastlane (600s)
-2. **Fix infinite retry loop** — JobFoundation ~L530
-3. **Move SimulatorPreviewService.runCommand()** to Task.detached
+| Target | Tests | Coverage Area |
+|--------|-------|---------------|
+| **CC: PipelineIntegrationTests** | 16 | SSE streaming (normal, chunked, split-boundary, byte-at-a-time, mid-stream drop), tool calls, cancellation, request validation, history |
+| **CC: CapabilityRoutingTests** | 12 | Capability matching, routing decisions, cost profiles, DAG step routing |
+| **CC: RecoveryContractTests** | 4 | Retry success, circuit breaker, sandbox violations, transient failures |
+| **CC: TraceLogContractTests** | 5 | Span lifecycle, parent-child, structured fields, error recording, summaries |
+| **SPM: AgentCouncilTests** | ~60 | Guardrails (15), Recovery (31), Tracing, Handoffs |
+| **SPM: ExecutorTests** | ~30 | Build repair execution |
+| **SPM: BuildDiagnosticsTests** | ~30 | Xcode output parsing |
+| **SPM: MultimodalEngineTests** | ~30 | Vision payloads, presets, bounding boxes |
+| **Total** | **187** | |
+
+---
+
+## 7. Prioritized Remaining Work
 
 ### Tier 1: Next Sprint
-4. **Extract WorkspaceCoordinator from CommandCenterView** — reduces 1200 → <400 lines
-5. **Resolve SPM/CC split** — import AgentCouncil, delete shadow copies
-6. ~~**Add memory bounds**~~ ✅ (partial) — readAll capped at 10MB, TraceCollector continuations leak fixed. Remaining: cap spans at 5000, circular buffer LatencyDiagnostics
-7. **Fix CompactionCoordinator deadlock** — auto-reset after 120s
+1. **Resolve SPM/CC split** — import AgentCouncil as local package dependency, delete shadow copies
+2. **Fix JobFoundation infinite retry** — add 60s cumulative timeout
+3. **Bound remaining memory** — cap SessionInspectorModel spans at 5K, circular buffer LatencyDiagnostics
 
 ### Tier 2: Following Sprint
-8. **Split AgenticBridge** into handlers + dispatcher
-9. **Fix ExecutionPaneView task leaks** — cancel pendingStageTask in onDisappear
-10. **Add jitter to retry backoff** in ToolError
-11. **Batch SessionInspectorModel.rebuildSummary()** — every 500ms not per-span
-12. **Cache CodeBlockCard.resolvedPackageRoot** — compute once
+4. **Fix O(n²) StreamingMarkdownRevealView** — batch 10 chars at a time
+5. **Debounce ChatThread scroll** — prevent rapid onChange cascades
+6. **Add tracers** to CC RecoveryExecutor and ExecutorAgent
 
 ### Tier 3: Ongoing
-13. Replace string.contains() tool classification with enums
-14. Add depth limits to parsers and span trees
-15. Persist ArchitectureValidator violations
-16. Add tracer to CC RecoveryExecutor and ExecutorAgent
-17. Add cancellation to ExecutorAgent and TaskPlanExecutor
+7. Replace string.contains() tool classification with enums
+8. Add depth limits to parsers and span trees
+9. Fix sandbox check ordering (M6 — check before write, not after)
+10. Handle ViewportStreamModel illegal transitions (M10 — log or throw)
 
 ---
 
-## 11. Refactor Recommendations
+## 8. What NOT to Change
 
-| # | What | Why | Risk | Scope |
-|---|------|-----|------|-------|
-| R1 | Extract Coordinators from CommandCenterView | God Object → testable coordinators | Medium | ~400 LOC/coordinator |
-| R2 | Split AgenticBridge into Handler + Dispatcher | 3500 LOC actor untestable | Medium | ~2000 LOC restructured |
-| R3 | Unify SPM/CC through package import | Eliminate 4-file duplication | Low | Types already compatible |
-| R4 | Introduce ToolHandler protocol | Enable per-tool unit testing | Low | Mechanical extraction |
-| R5 | StreamingMarkdownRevealView batch reveals | O(n²) → O(n) | Low | Imperceptible visual change |
-
----
-
-## 12. What NOT to Change
-
-1. **Actor-based concurrency model** — GitService, TraceCollector, BackgroundJobRunner, ArchitectureValidator correctly isolated
-2. **@Observable for view models** — StreamPhaseController, ViewportStreamModel, RepositoryMonitor, JobMonitor are the pattern to replicate
-3. **Streaming pipeline FSM** — 8-phase StreamPhaseController is well-designed. Fix edges, keep structure
-4. **SwiftData for persistence** — AppProject, Epoch, PersistedThread, PersistedSpan are clean @Model types
-5. **Design token system** — StudioColorTokens, StudioTypography, StudioSpacing, StudioPolish, StudioMotion, StudioRadius mature and fully migrated
-6. **HandoffTypes.swift** — Zero red flags. Clean Sendable value types
-7. **ArchitectureValidator concept** — runtime invariant checking is valuable, just needs persistence
-8. **NarrativeRenderer voice pipeline** — 7-layer transform is opinionated but functional
-9. **CoreSceneController visuals** — fix threading, don't redesign SceneKit setup
-10. **Dual CLI targets** — AgentCouncilCLI + ExecutorCLI valuable for standalone testing
-
----
-
-## Final Questions — Direct Answers
-
-### 1. Is the codebase trending toward maintainable or spaghetti?
-**Trending maintainable, but at the inflection point.** Infrastructure layer (actors, tracing, git, jobs) is clean. View layer is where spaghetti is forming — specifically CommandCenterView and ExecutionPaneView. If the God Object pattern isn't broken in the next 1–2 feature cycles, prop threading will cross the point where safe refactoring is possible.
-
-### 2. Top 3 risks that could poison the foundation?
-1. **CommandCenterView God Object** — every feature adds state here. At 30+ properties, no one will safely refactor it.
-2. **Missing process timeouts** — one hung git or simulator command freezes the entire app with no recovery. Only risk that can make the app unshippable.
-3. **SPM/CC source-of-truth split** — as both evolve independently, shadow copies will drift. CC's recovery executor already lacks observability.
-
-### 3. Single most important architecture change needed?
-**Extract coordinators from CommandCenterView.** This unblocks everything else. A 200-line layout shell with 3 observable coordinators is testable, navigable, and safe to extend. Do this before any new feature work.
-
-### 4. Is the streaming/tool-call stack trustworthy?
-**Conditionally yes.** The streaming FSM is well-designed. The tool execution model (parallelism partitioning, guardrails, sandbox) is sound. But: tool classification is string-based and fragile, there's no HTTP stream cancellation, retry has no jitter, and the entire stack lives in one 3,500-line actor. Split AgenticBridge and replace string heuristics with enums.
-
-### 5. Is the chat/rendering layer good enough for a permanent control surface?
-**Yes, with caveats.** The block model, markdown parser, code block cards with diff/apply, and phase-driven streaming renderer are architecturally solid. Fix: batch StreamingMarkdownRevealView, cache CodeBlockCard package root, finer-grained ConversationTurnListItem.Equatable. None are structural — performance polish on a sound foundation.
+1. Actor-based concurrency model (AgenticBridge, TraceCollector, LatencyDiagnostics, RecoveryExecutor)
+2. @Observable for view models (ConversationStore, StreamPhaseController, ViewportStreamModel)
+3. Streaming pipeline FSM — 8-phase StreamPhaseController is well-designed
+4. SwiftData for persistence — @Model types are clean
+5. Design token system (StudioColorTokens, StudioTypography, StudioMotion, StudioPolish)
+6. HandoffTypes.swift — zero red flags, clean Sendable value types
+7. ArchitectureValidator concept — runtime invariant checking
+8. Domain-based folder structure (Execution/, Routing/, Tools/, UI/, etc.)
+9. Dual CLI targets (AgentCouncilCLI, ExecutorCLI)
+10. Integration test infrastructure (MockSSEServer, URLProtocol interception)

@@ -144,3 +144,57 @@ Per-DAG-step:
 - **Phase 4: Feedback-Driven Learning** — Use trace telemetry to build confidence
   scores per model×task-type pair. Weight routing decisions by historical success rates.
   `PlanAdaptationReason` enum is already structured for analytics extraction.
+
+---
+
+## Decision Provenance
+
+Every routing decision produces trace attributes that form a provenance chain. These
+attributes are contracts — changing their names or semantics is a breaking change for
+any analytics or debugging tool that consumes them.
+
+### Per-Decision Attributes
+| Attribute | Type | Meaning |
+|-----------|------|---------|
+| `routing.strategy` | String | Which priority level matched (e.g., `capability_match`, `failure_escalation`) |
+| `routing.model` | String | Selected model ID |
+| `routing.role` | String | Selected role (e.g., `full_send`, `review`) |
+| `routing.capabilities_required` | [String] | Capability set if `capability_match` was the strategy |
+| `routing.candidates` | [String] | All roles that satisfied the required capabilities |
+| `routing.cost` | Double | `relativeCost` of the selected model profile |
+
+### Per-DAG-Step Attributes
+| Attribute | Type | Meaning |
+|-----------|------|---------|
+| `dag.step.{id}.routing_strategy` | String | Strategy used for this step |
+| `dag.step.{id}.model` | String | Model selected for this step |
+| `dag.step.{id}.phase` | String | Task phase (discovery, analysis, implementation, verification, repair) |
+| `dag.step.{id}.capabilities` | [String] | Required capabilities for this step |
+
+### Adaptation Attributes
+| Attribute | Type | Meaning |
+|-----------|------|---------|
+| `adaptation.reason` | String | Why the plan was adapted (verification_passed, discovery_failed, retries_exhausted) |
+| `adaptation.role_before` | String | Role before adaptation |
+| `adaptation.role_after` | String | Role after adaptation |
+| `adaptation.count` | Int | Current adaptation count (max 3) |
+
+### Contract Rules
+1. Attribute names are stable — do not rename without a migration plan.
+2. New attributes may be added freely.
+3. `routing.strategy` values correspond 1:1 to priority cascade levels.
+4. `adaptation.count` must never exceed `TaskPlan.maxAdaptations` (currently 3).
+
+---
+
+## Key Files
+
+| Concern | File | Path |
+|---------|------|------|
+| Routing engine | ModelRouting | `Routing/ModelRouting.swift` |
+| Plan generation + execution | TaskPlanEngine | `Routing/TaskPlanEngine.swift` |
+| AGENTS.md parsing | AGENTSParser | `Routing/AGENTSParser.swift` |
+| Tool schemas | ToolSchemas | `Routing/ToolSchemas.swift` |
+| Pipeline orchestration | PipelineRunner | `Execution/Pipeline/PipelineRunner.swift` |
+| Step routing | PipelineStepRouter | `Execution/Pipeline/PipelineStepRouter.swift` |
+| Configuration | ship.toml | `.studio92/ship.toml` |

@@ -31,7 +31,7 @@ TestFlight-ready binary.
 │  StreamingTextBuffer · StreamRendering                          │
 ├─────────────────────────────────────────────────────────────────┤
 │  Tool Layer                                                     │
-│  AgenticToolDispatch → per-tool execution                       │
+│  ToolDispatch → per-tool execution                              │
 │  ToolGuardrails (SandboxPolicy · ToolPermissionPolicy)          │
 │  ToolParallelism (read/write partitioning, TaskGroup ceiling)   │
 │  StatefulTerminalEngine · CodexTerminalCoordinator              │
@@ -110,7 +110,7 @@ Tool Calls (if any)
   │
   ├─ ToolGuardrails.check()          — sandbox + permission gate
   ├─ ToolParallelism.partition()     — reads ∥, writes sequential
-  └─ AgenticToolDispatch.execute()   — per-tool handler
+  └─ ToolDispatch.execute()           — per-tool handler
       │
       ├─ file_read, file_write, file_patch
       ├─ terminal → StatefulTerminalEngine
@@ -170,9 +170,9 @@ UI renders (ChatThreadComponents, ExecutionPaneView, etc.)
   and working directory tracking across tool calls.
 
 ### Persistence (`CommandCenter/Persistence/`)
-- **ConversationModels.swift** — `ConversationStore` (@Observable), turn models,
+- **ConversationStore.swift** — `ConversationStore` (@Observable), turn models,
   message types. The in-memory conversation state.
-- **PersistenceModels.swift** — SwiftData `@Model` types for threads and messages.
+- **ThreadStorageModels.swift** — SwiftData `@Model` types for threads and messages.
 - **ThreadCoordinator.swift** — Thread lifecycle management (380 LOC, extracted from
   CommandCenterView).
 - **ThreadPersistenceCoordinator.swift** — SwiftData read/write coordination.
@@ -236,7 +236,7 @@ drift. Planned fix: import AgentCouncil as a local package dependency.
 ## Test Infrastructure
 
 - **CC Tests (37):** Xcode target `CommandCenterTests` in `CommandCenter/IntegrationTests/`
-  - `AgenticPipelineTests` (16) — SSE streaming, chunked delivery, tool calls, cancellation
+  - `PipelineIntegrationTests` (16) — SSE streaming, chunked delivery, tool calls, cancellation
   - `CapabilityRoutingTests` (12) — Capability matching, routing decisions, cost profiles
   - `RecoveryContractTests` (4) — Retry, circuit breaker, sandbox violations
   - `TraceLogContractTests` (5) — Span lifecycle, parent-child, structured fields
