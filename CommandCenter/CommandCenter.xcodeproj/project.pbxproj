@@ -217,12 +217,106 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		13F27B410EBB4F7F1CBFF424 /* Streaming */ = {
+			isa = PBXGroup;
+			children = (
+				243A90120F3395E47DA4ED89 /* AnthropicStreamHandler.swift */,
+				D2F6AB722EC2982C0B7E0B7F /* OpenAIStreamHandler.swift */,
+			);
+			name = Streaming;
+			path = Streaming;
+			sourceTree = "<group>";
+		};
+		18545D38BCD62C19EE8D6F2D /* Routing */ = {
+			isa = PBXGroup;
+			children = (
+				801F43235E5551396C703A24 /* AGENTSParser.swift */,
+				B2C3D4E5F6A7B8C9D0E1F2A3 /* ModelRouting.swift */,
+				FECCC1286EE0414DB41D8B02 /* TaskPlanEngine.swift */,
+				F8A9B0C1D2E3F4A5B6C7D8E9 /* ToolSchemas.swift */,
+			);
+			name = Routing;
+			path = Routing;
+			sourceTree = "<group>";
+		};
+		1C68B471BE5A7C2BCEF844D2 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				2F915974699CEFD5FC97DEAA /* Chat */,
+				EE8A06FF1F27669CEBA3633F /* Components */,
+				69EFF0B5B7EED9EA842C5F59 /* Inspector */,
+				D792271CCDCBF4A00EDFB84A /* Layout */,
+			);
+			name = UI;
+			path = UI;
+			sourceTree = "<group>";
+		};
+		2F915974699CEFD5FC97DEAA /* Chat */ = {
+			isa = PBXGroup;
+			children = (
+				54E8EF5A6BC271B03CABAA64 /* ChatDetailViews.swift */,
+				334556BC72737D361460E7E1 /* ChatThreadComponents.swift */,
+				6084365298D5B06D837BD44F /* ComposerViews.swift */,
+			);
+			name = Chat;
+			path = Chat;
+			sourceTree = "<group>";
+		};
 		5B4E5ACE7A369F75601097C0 /* OS X */ = {
 			isa = PBXGroup;
 			children = (
 				B4D8CE275DF28005E3825BB8 /* Cocoa.framework */,
 			);
 			name = "OS X";
+			sourceTree = "<group>";
+		};
+		69EFF0B5B7EED9EA842C5F59 /* Inspector */ = {
+			isa = PBXGroup;
+			children = (
+				66048FAB701ED1745115AC69 /* SessionInspectorModel.swift */,
+				3A2061CBABA9A00BF6A13C1E /* SessionInspectorView.swift */,
+			);
+			name = Inspector;
+			path = Inspector;
+			sourceTree = "<group>";
+		};
+		6D5270D9018B5CE0890DBF49 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				58B173609B5ACC9BA06B3BBE /* CommandCenterApp.swift */,
+				5B1C934A6F31C2872971FD55 /* CommandCenterView.swift */,
+				E3407F9293634F98E3070A3B /* CoreSceneController.swift */,
+			);
+			name = App;
+			path = App;
+			sourceTree = "<group>";
+		};
+		8A7F4F453755FD7185B2B2DC /* Persistence */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D4E5F6A7B8C9D0E1F2 /* ConversationModels.swift */,
+				C3D4E5F6A7B8C9D0E1F2A3B4 /* PersistenceModels.swift */,
+				C1A92B3F0002000000000002 /* ThreadCoordinator.swift */,
+				D4E5F6A7B8C9D0E1F2A3B4C5 /* ThreadPersistenceCoordinator.swift */,
+				C1A92B3F0002000000000003 /* ThreadTitleGenerator.swift */,
+			);
+			name = Persistence;
+			path = Persistence;
+			sourceTree = "<group>";
+		};
+		9229D1BF8D5FB4ABFF691E21 /* Studio */ = {
+			isa = PBXGroup;
+			children = (
+				800F05E44E29E13A73C04DB3 /* StudioAutomationEngine.swift */,
+				DBD3D7A9B654504FB25007D1 /* StudioColorTokens.swift */,
+				49CE67B96EC45B43F55B55D3 /* StudioFeedback.swift */,
+				50EA867C99A18AC7CB7FE690 /* StudioInsightEngine.swift */,
+				231E0F0ED79FD083925A3F04 /* StudioMotion.swift */,
+				31290122814BEDC093522436 /* StudioPolish.swift */,
+				FB5CE10109B2D38A84CBF328 /* StudioTypography.swift */,
+			);
+			name = Studio;
+			path = Studio;
 			sourceTree = "<group>";
 		};
 		A10000050000000000000001 = {
@@ -238,88 +332,22 @@
 		A10000050000000000000002 /* . */ = {
 			isa = PBXGroup;
 			children = (
-				801F43235E5551396C703A24 /* AGENTSParser.swift */,
-				664DBA53DF674619E6090CBF /* AgenticBridge.swift */,
-				CFF321DD08D050CA95603A25 /* AgenticBridgeTypes.swift */,
-				D5E0528FE6487D95E24D423D /* AgenticToolDispatch.swift */,
-				B4C5D6E7F8A9B0C1D2E3F4A5 /* AnthropicExecutionLoop.swift */,
-				243A90120F3395E47DA4ED89 /* AnthropicStreamHandler.swift */,
-				E54E86D54FB79B7F011E22C8 /* ArchitectureValidator.swift */,
-				9C9859DACF04DCEA13A4144E /* ArtifactViews.swift */,
-				A1BD1A9F0002000000000001 /* BuildDiagnostics.swift */,
-				334556BC72737D361460E7E1 /* ChatThreadComponents.swift */,
-				9BC2A86E4AEC9D426B2CFB51 /* CodeDiffEngine.swift */,
-				775B4B1CB3E88F5612D3867B /* CodexTerminalCoordinator.swift */,
-				58B173609B5ACC9BA06B3BBE /* CommandCenterApp.swift */,
-				A1B2C3D4E5F6A7B8C9D0E1F2 /* ConversationModels.swift */,
-				5B1C934A6F31C2872971FD55 /* CommandCenterView.swift */,
-				8A995873CE6BE5FC6BE8045B /* CompactionCoordinator.swift */,
-				54E8EF5A6BC271B03CABAA64 /* ChatDetailViews.swift */,
-				042EA3AE8E938245ADABFA7C /* ContextHeaderView.swift */,
-				C367A461F4E118C7C9A5C293 /* InlineMonitorViews.swift */,
-				6084365298D5B06D837BD44F /* ComposerViews.swift */,
-				D6E7F8A9B0C1D2E3F4A5B6C7 /* OpenAIExecutionLoop.swift */,
-				D2F6AB722EC2982C0B7E0B7F /* OpenAIStreamHandler.swift */,
-				ED7F5373E011CAB91D057AEF /* DeploymentCoordinator.swift */,
-				E3407F9293634F98E3070A3B /* CoreSceneController.swift */,
-				642EC1A337F97465525E89FA /* DashboardViews.swift */,
-				F2A3B4C5D6E7F8A9B0C1D2E3 /* ExecutionLoopEngine.swift */,
-				BE5B68FA81B08646EB403D7F /* ExecutionPaneView.swift */,
-				2034CD4B07118E1296046EC8 /* ExecutionTreeViews.swift */,
-				C0EC4069E32705F6D442C25D /* FactoryObserver.swift */,
-				964EF521CCB353D2DCC6A9A9 /* FleetSidebarView.swift */,
-				B1E6F411FA149895B47F9BE9 /* GitFoundation.swift */,
-				2EEF8CA3E93FF8574463EB69 /* HandoffExecutor.swift */,
-				AB8F81521F0923CDCD8FADAF /* JobFoundation.swift */,
-				9EAD2BEED85ED56F7D51C38F /* LatencyDiagnostics.swift */,
-				E5F6A7B8C9D0E1F2A3B4C5D6 /* LiveStateEngine.swift */,
-				2B6BF72433BC9DC7E70F481C /* MarkdownRendering.swift */,
-				7A9D73D520077B899911E482 /* MemoryHardening.swift */,
-				B2C3D4E5F6A7B8C9D0E1F2A3 /* ModelRouting.swift */,
-				A1BD1A9F0002000000000002 /* MultimodalEngine.swift */,
-				6F0EC998D64DC13749494CAC /* NarrativeRenderer.swift */,
-				C3D4E5F6A7B8C9D0E1F2A3B4 /* PersistenceModels.swift */,
-				F6A7B8C9D0E1F2A3B4C5D6E7 /* PipelineRunner.swift */,
-				A7B8C9D0E1F2A3B4C5D6E7F8 /* PipelineSupport.swift */,
-				C8E25A9085CDF22794D89368 /* RepositoryMonitor.swift */,
-				66048FAB701ED1745115AC69 /* SessionInspectorModel.swift */,
-				3A2061CBABA9A00BF6A13C1E /* SessionInspectorView.swift */,
-				64B2D884055203AD30D338FA /* SessionTemplateEngine.swift */,
-				78812A36A4EAA85CBB39408B /* SimulatorPreviewService.swift */,
-				FFD58665651DA71F7E8A8272 /* StatefulTerminalEngine.swift */,
-				3E705B78D930FA2FE4C9044E /* StreamPipeline.swift */,
-				2E065D6BBACBDE1BDC9D5609 /* StreamRendering.swift */,
-				B8C9D0E1F2A3B4C5D6E7F8A9 /* StreamingTextBuffer.swift */,
-				DBD3D7A9B654504FB25007D1 /* StudioColorTokens.swift */,
-				49CE67B96EC45B43F55B55D3 /* StudioFeedback.swift */,
-				D4E5F6A7B8C9D0E1F2A3B4C5 /* ThreadPersistenceCoordinator.swift */,
-				50EA867C99A18AC7CB7FE690 /* StudioInsightEngine.swift */,
-				800F05E44E29E13A73C04DB3 /* StudioAutomationEngine.swift */,
-				231E0F0ED79FD083925A3F04 /* StudioMotion.swift */,
-				FB5CE10109B2D38A84CBF328 /* StudioTypography.swift */,
-				31290122814BEDC093522436 /* StudioPolish.swift */,
-				FECCC1286EE0414DB41D8B02 /* TaskPlanEngine.swift */,
-				B1C46E542B3B401A11649643 /* TelemetryIngestor.swift */,
-				239EBAFDFA23D2EF5670921C /* ToolCallComponents.swift */,
-				F4DD050439E57775A7AC464A /* ToolGuardrails.swift */,
-				D68C5BBAF268058BF00C3223 /* ToolParallelism.swift */,
-				F8A9B0C1D2E3F4A5B6C7D8E9 /* ToolSchemas.swift */,
-				23CA90F11D465BF248E19EC4 /* TraceStore.swift */,
-				633CBB71F894C8E0A4A94297 /* ViewportPaneView.swift */,
-				910F616E0B2B18AE93235C5C /* ViewportStreamModel.swift */,
-				2C15C21A1D66B78F091B982F /* VolumetricCoreView.swift */,
-				D301484DF572698F2941DE58 /* WorkspaceBackground.swift */,
-				406850612D88EBCDE400326F /* WorkspaceShellView.swift */,
-				C1A92B3F0002000000000001 /* WorkspaceCoordinator.swift */,
-				C1A92B3F0002000000000002 /* ThreadCoordinator.swift */,
-				C1A92B3F0002000000000003 /* ThreadTitleGenerator.swift */,
-				7786CDF5DA4B2DD35D029C4D /* WorktreeJobViews.swift */,
+				6D5270D9018B5CE0890DBF49 /* App */,
+				B5FDAB70FD32AA9B80B66944 /* Bridge */,
+				A59A1F44969BFC3DCD4E3044 /* Diagnostics */,
+				D75BDC45F45E76BFAF9240D6 /* Execution */,
+				8A7F4F453755FD7185B2B2DC /* Persistence */,
+				18545D38BCD62C19EE8D6F2D /* Routing */,
+				9229D1BF8D5FB4ABFF691E21 /* Studio */,
+				DD6C1C3F70675392AEE008EB /* Tools */,
+				1C68B471BE5A7C2BCEF844D2 /* UI */,
+				B9D2F3E925FA11C7AC617AB1 /* Workspace */,
+				2E99A0DFFE45A1791374DAD5 /* studio92-hero.jpg */,
 				F98CF927E58EF138B4C9E96F /* Geist-Light.ttf */,
 				A4BAFF4AA60D144041CADF0F /* Geist-Medium.ttf */,
 				58F2486771345ACA7568DAD6 /* Geist-Regular.ttf */,
 				D66DB9A7EAB20B6D9ABC1B04 /* Studio.92CoreAsset.usdz */,
 				EADD6A7B3A16B7D22D156E9A /* Studio.92GeneratedCore.usdz */,
-				2E99A0DFFE45A1791374DAD5 /* studio92-hero.jpg */,
 			);
 			path = .;
 			sourceTree = "<group>";
@@ -333,6 +361,20 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		A59A1F44969BFC3DCD4E3044 /* Diagnostics */ = {
+			isa = PBXGroup;
+			children = (
+				E54E86D54FB79B7F011E22C8 /* ArchitectureValidator.swift */,
+				A1BD1A9F0002000000000001 /* BuildDiagnostics.swift */,
+				9EAD2BEED85ED56F7D51C38F /* LatencyDiagnostics.swift */,
+				7A9D73D520077B899911E482 /* MemoryHardening.swift */,
+				B1C46E542B3B401A11649643 /* TelemetryIngestor.swift */,
+				23CA90F11D465BF248E19EC4 /* TraceStore.swift */,
+			);
+			name = Diagnostics;
+			path = Diagnostics;
+			sourceTree = "<group>";
+		};
 		ACD7A85EEF5E8D77AB4139AF /* IntegrationTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -343,12 +385,123 @@
 			path = IntegrationTests;
 			sourceTree = "<group>";
 		};
+		B5FDAB70FD32AA9B80B66944 /* Bridge */ = {
+			isa = PBXGroup;
+			children = (
+				664DBA53DF674619E6090CBF /* AgenticBridge.swift */,
+				CFF321DD08D050CA95603A25 /* AgenticBridgeTypes.swift */,
+				A1BD1A9F0002000000000002 /* MultimodalEngine.swift */,
+			);
+			name = Bridge;
+			path = Bridge;
+			sourceTree = "<group>";
+		};
+		B9D2F3E925FA11C7AC617AB1 /* Workspace */ = {
+			isa = PBXGroup;
+			children = (
+				ED7F5373E011CAB91D057AEF /* DeploymentCoordinator.swift */,
+				C0EC4069E32705F6D442C25D /* FactoryObserver.swift */,
+				B1E6F411FA149895B47F9BE9 /* GitFoundation.swift */,
+				AB8F81521F0923CDCD8FADAF /* JobFoundation.swift */,
+				C8E25A9085CDF22794D89368 /* RepositoryMonitor.swift */,
+				64B2D884055203AD30D338FA /* SessionTemplateEngine.swift */,
+				78812A36A4EAA85CBB39408B /* SimulatorPreviewService.swift */,
+				C1A92B3F0002000000000001 /* WorkspaceCoordinator.swift */,
+			);
+			name = Workspace;
+			path = Workspace;
+			sourceTree = "<group>";
+		};
+		BC09D5C1861E5BBFC09D5BAA /* Loops */ = {
+			isa = PBXGroup;
+			children = (
+				B4C5D6E7F8A9B0C1D2E3F4A5 /* AnthropicExecutionLoop.swift */,
+				F2A3B4C5D6E7F8A9B0C1D2E3 /* ExecutionLoopEngine.swift */,
+				D6E7F8A9B0C1D2E3F4A5B6C7 /* OpenAIExecutionLoop.swift */,
+			);
+			name = Loops;
+			path = Loops;
+			sourceTree = "<group>";
+		};
+		D75BDC45F45E76BFAF9240D6 /* Execution */ = {
+			isa = PBXGroup;
+			children = (
+				BC09D5C1861E5BBFC09D5BAA /* Loops */,
+				F1870F83A33A2EF58F177A99 /* Pipeline */,
+				13F27B410EBB4F7F1CBFF424 /* Streaming */,
+				8A995873CE6BE5FC6BE8045B /* CompactionCoordinator.swift */,
+				2EEF8CA3E93FF8574463EB69 /* HandoffExecutor.swift */,
+				E5F6A7B8C9D0E1F2A3B4C5D6 /* LiveStateEngine.swift */,
+			);
+			name = Execution;
+			path = Execution;
+			sourceTree = "<group>";
+		};
+		D792271CCDCBF4A00EDFB84A /* Layout */ = {
+			isa = PBXGroup;
+			children = (
+				642EC1A337F97465525E89FA /* DashboardViews.swift */,
+				BE5B68FA81B08646EB403D7F /* ExecutionPaneView.swift */,
+				2034CD4B07118E1296046EC8 /* ExecutionTreeViews.swift */,
+				964EF521CCB353D2DCC6A9A9 /* FleetSidebarView.swift */,
+				633CBB71F894C8E0A4A94297 /* ViewportPaneView.swift */,
+				910F616E0B2B18AE93235C5C /* ViewportStreamModel.swift */,
+				2C15C21A1D66B78F091B982F /* VolumetricCoreView.swift */,
+				D301484DF572698F2941DE58 /* WorkspaceBackground.swift */,
+				406850612D88EBCDE400326F /* WorkspaceShellView.swift */,
+				7786CDF5DA4B2DD35D029C4D /* WorktreeJobViews.swift */,
+			);
+			name = Layout;
+			path = Layout;
+			sourceTree = "<group>";
+		};
+		DD6C1C3F70675392AEE008EB /* Tools */ = {
+			isa = PBXGroup;
+			children = (
+				D5E0528FE6487D95E24D423D /* AgenticToolDispatch.swift */,
+				775B4B1CB3E88F5612D3867B /* CodexTerminalCoordinator.swift */,
+				FFD58665651DA71F7E8A8272 /* StatefulTerminalEngine.swift */,
+				239EBAFDFA23D2EF5670921C /* ToolCallComponents.swift */,
+				F4DD050439E57775A7AC464A /* ToolGuardrails.swift */,
+				D68C5BBAF268058BF00C3223 /* ToolParallelism.swift */,
+			);
+			name = Tools;
+			path = Tools;
+			sourceTree = "<group>";
+		};
 		ED57A58A75CB8532E60A55B6 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
 				5B4E5ACE7A369F75601097C0 /* OS X */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		EE8A06FF1F27669CEBA3633F /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				9C9859DACF04DCEA13A4144E /* ArtifactViews.swift */,
+				9BC2A86E4AEC9D426B2CFB51 /* CodeDiffEngine.swift */,
+				042EA3AE8E938245ADABFA7C /* ContextHeaderView.swift */,
+				C367A461F4E118C7C9A5C293 /* InlineMonitorViews.swift */,
+				2B6BF72433BC9DC7E70F481C /* MarkdownRendering.swift */,
+				6F0EC998D64DC13749494CAC /* NarrativeRenderer.swift */,
+			);
+			name = Components;
+			path = Components;
+			sourceTree = "<group>";
+		};
+		F1870F83A33A2EF58F177A99 /* Pipeline */ = {
+			isa = PBXGroup;
+			children = (
+				F6A7B8C9D0E1F2A3B4C5D6E7 /* PipelineRunner.swift */,
+				A7B8C9D0E1F2A3B4C5D6E7F8 /* PipelineSupport.swift */,
+				3E705B78D930FA2FE4C9044E /* StreamPipeline.swift */,
+				2E065D6BBACBDE1BDC9D5609 /* StreamRendering.swift */,
+				B8C9D0E1F2A3B4C5D6E7F8A9 /* StreamingTextBuffer.swift */,
+			);
+			name = Pipeline;
+			path = Pipeline;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */

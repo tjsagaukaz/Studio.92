@@ -44,12 +44,12 @@ let package = Package(
         ),
         .target(
             name: "BuildDiagnostics",
-            path: "CommandCenter",
+            path: "CommandCenter/Diagnostics",
             sources: ["BuildDiagnostics.swift"]
         ),
         .target(
             name: "MultimodalEngine",
-            path: "CommandCenter",
+            path: "CommandCenter/Bridge",
             sources: ["MultimodalEngine.swift"]
         ),
         .testTarget(
