@@ -492,4 +492,353 @@ final class AgenticPipelineTests: XCTestCase {
         }
         XCTAssertTrue(completed, "Expected completion event")
     }
+
+    // MARK: - A. Flaky Network Tests
+
+    // MARK: 13. Chunked Delivery — Chunks Arrive Separately
+
+    func testChunkedDeliveryReassemblesCorrectly() async throws {
+        // Given: SSE events arrive in 3 separate didLoad() calls
+        // The parser must reassemble the byte stream correctly.
+        // Each chunk needs a trailing "" so the joined "\n" creates
+        // the blank-line delimiter for the last SSE event in the chunk.
+        let chunk1 = [
+            AnthropicSSE.messageStart(),
+            AnthropicSSE.contentBlockStart(index: 0),
+            AnthropicSSE.textDelta(index: 0, text: "Hello"),
+            ""
+        ]
+        let chunk2 = [
+            AnthropicSSE.textDelta(index: 0, text: " from"),
+            AnthropicSSE.textDelta(index: 0, text: " chunked"),
+            ""
+        ]
+        let chunk3 = [
+            AnthropicSSE.textDelta(index: 0, text: " stream!"),
+            AnthropicSSE.contentBlockStop(index: 0),
+            AnthropicSSE.messageDelta(),
+            AnthropicSSE.messageStop()
+        ]
+
+        MockSSEProtocol.enqueue(.chunkedSSE(chunks: [chunk1, chunk2, chunk3]))
+
+        let client = makeClient()
+        let stream = await client.run(
+            system: "Test",
+            userMessage: "Chunked test",
+            model: StudioModelStrategy.fullSend
+        )
+
+        let events = await collectEvents(from: stream)
+
+        // All text deltas should arrive correctly despite chunked delivery
+        let text = accumulatedText(from: events)
+        XCTAssertEqual(text, "Hello from chunked stream!")
+
+        // Should complete normally
+        let completed = events.contains { if case .completed = $0 { return true }; return false }
+        XCTAssertTrue(completed, "Expected completion event after chunked delivery")
+    }
+
+    // MARK: 14. Mid-Stream Network Error
+
+    func testMidStreamNetworkError() async throws {
+        // Given: A chunked response where the connection drops mid-stream
+        // First chunk has headers + partial content, then connection error
+        MockSSEProtocol.enqueue(.chunkedSSE(
+            chunks: [
+                [AnthropicSSE.messageStart(),
+                 AnthropicSSE.contentBlockStart(index: 0),
+                 AnthropicSSE.textDelta(index: 0, text: "partial"),
+                 ""] // terminate last event so parser emits it
+                // No more chunks — simulating dropped connection
+                // The URLProtocol will finish loading after the first chunk,
+                // which means the SSE stream will end without message_stop
+            ]
+        ))
+
+        let client = makeClient()
+        let stream = await client.run(
+            system: "Test",
+            userMessage: "Drop test",
+            model: StudioModelStrategy.fullSend
+        )
+
+        // Stream should end after single chunk (no message_stop sent)
+        let events = await collectEvents(from: stream)
+
+        // Should have received the partial text
+        let text = accumulatedText(from: events)
+        XCTAssertTrue(text.contains("partial"), "Should have received partial text before drop")
+    }
+
+    // MARK: 15. Split SSE Event Across Chunk Boundaries
+
+    func testSSEEventSplitAcrossChunkBoundaries() async throws {
+        // Given: An SSE event's data line is split across two chunks.
+        // The parser must reassemble it correctly from the byte stream.
+        // We manually construct raw SSE strings that split mid-event.
+        let rawChunk1 = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"usage\":{\"input_tokens\":42,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_del"
+        let rawChunk2 = "ta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Reassembled!\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":50}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+
+        // Use raw chunked SSE — deliver as pre-joined strings
+        MockSSEProtocol.enqueue(.chunkedSSE(chunks: [[rawChunk1], [rawChunk2]], delayMs: 30))
+
+        let client = makeClient()
+        let stream = await client.run(
+            system: "Test",
+            userMessage: "Split boundary",
+            model: StudioModelStrategy.fullSend
+        )
+
+        let events = await collectEvents(from: stream)
+        let text = accumulatedText(from: events)
+        XCTAssertEqual(text, "Reassembled!", "SSE event split across chunks should reassemble correctly")
+    }
+}
+
+// MARK: - B. Recovery & Circuit Breaker Contract Tests
+
+final class RecoveryContractTests: XCTestCase {
+
+    // MARK: 1. Retry Policy Applies with Backoff
+
+    func testRetrySucceedsAfterTransientFailure() async throws {
+        let recovery = RecoveryExecutor()
+        var attempts = 0
+
+        // .timeout maps to .retryWithBackoff(maxAttempts: 2)
+        let result = await recovery.attemptRecovery(
+            for: .timeout(tool: "terminal", elapsed: 30)
+        ) {
+            attempts += 1
+            if attempts < 2 {
+                // First attempt fails (returns nil)
+                return nil
+            }
+            return ("success after retry", false)
+        }
+
+        XCTAssertTrue(result.succeeded, "Recovery should succeed after transient failure, got: \(result)")
+        XCTAssertTrue(attempts >= 2, "Should have retried at least twice, got \(attempts)")
+    }
+
+    // MARK: 2. Fail-Fast Errors Skip Retry
+
+    func testSandboxViolationFailsFast() async throws {
+        let recovery = RecoveryExecutor()
+        var attempts = 0
+
+        let result = await recovery.attemptRecovery(
+            for: .sandboxViolation(tool: "file_write", path: "/etc/passwd")
+        ) {
+            attempts += 1
+            return ("should not reach", false)
+        }
+
+        XCTAssertTrue(result.isError, "Sandbox violation should fail fast")
+        XCTAssertEqual(attempts, 0, "Sandbox violation should not attempt retry")
+    }
+
+    // MARK: 3. Circuit Breaker Trips After Threshold
+
+    func testCircuitBreakerTripsAfterRepeatedFailures() async throws {
+        let config = CircuitBreaker.Configuration(
+            failureThreshold: 3,
+            windowSeconds: 30,
+            cooldownSeconds: 60
+        )
+        let recovery = RecoveryExecutor(circuitBreakerConfig: config)
+
+        // .invalidInput → .failFast → recordFailure() on each call
+        for i in 0..<3 {
+            let _ = await recovery.attemptRecovery(
+                for: .invalidInput(tool: "file_write", reason: "bad input \(i)")
+            ) { nil }
+        }
+
+        let state = await recovery.circuitBreakerState()
+        XCTAssertEqual(state, .open, "Breaker should be open after \(config.failureThreshold) failFast failures")
+
+        // Next retryWithBackoff attempt should be rejected by breaker
+        let result = await recovery.attemptRecovery(
+            for: .timeout(tool: "terminal", elapsed: 30)
+        ) {
+            XCTFail("Retry block should not execute when breaker is open")
+            return nil
+        }
+        XCTAssertTrue(result.isError, "Should fail when breaker is open")
+        XCTAssertTrue(result.displayText.contains("Circuit breaker open"),
+                       "Error should mention circuit breaker")
+    }
+
+    // MARK: 4. Circuit Breaker Resets
+
+    func testCircuitBreakerResetsOnCommand() async throws {
+        let config = CircuitBreaker.Configuration(failureThreshold: 2, windowSeconds: 30, cooldownSeconds: 60)
+        let recovery = RecoveryExecutor(circuitBreakerConfig: config)
+
+        for _ in 0..<2 {
+            let _ = await recovery.attemptRecovery(
+                for: .invalidInput(tool: "file_write", reason: "bad")
+            ) { nil }
+        }
+
+        let openState = await recovery.circuitBreakerState()
+        XCTAssertEqual(openState, .open)
+
+        await recovery.resetCircuitBreaker()
+        let closedState = await recovery.circuitBreakerState()
+        XCTAssertEqual(closedState, .closed, "Breaker should be closed after reset")
+    }
+}
+
+// MARK: - C. Trace & Log Contract Tests
+
+final class TraceLogContractTests: XCTestCase {
+
+    // MARK: 1. Span Lifecycle Contract
+
+    func testSpanLifecycle_beginEndProducesCompletedSpan() async throws {
+        let tracer = TraceCollector()
+
+        let spanID = await tracer.begin(
+            kind: .toolExecution,
+            name: "file_read",
+            attributes: ["tool": "file_read", "path": "/test.swift"]
+        )
+
+        await tracer.setAttribute("bytes_read", value: "1024", on: spanID)
+        await tracer.end(spanID)
+
+        let spans = await tracer.allSpans()
+        let span = spans.first { $0.id == spanID }
+
+        XCTAssertNotNil(span, "Completed span should be queryable")
+        XCTAssertEqual(span?.kind, .toolExecution)
+        XCTAssertEqual(span?.name, "file_read")
+        XCTAssertNotNil(span?.endedAt, "Span should have end time")
+        XCTAssertNotNil(span?.duration, "Span should have computed duration")
+        XCTAssertEqual(span?.attributes["tool"], "file_read")
+        XCTAssertEqual(span?.attributes["bytes_read"], "1024")
+        if case .ok = span?.status {} else {
+            XCTFail("Expected .ok status, got \(String(describing: span?.status))")
+        }
+    }
+
+    // MARK: 2. Error Span Records Failure
+
+    func testSpanError_recordsFailureMessage() async throws {
+        let tracer = TraceCollector()
+
+        let spanID = await tracer.begin(kind: .retry, name: "recovery_attempt")
+        await tracer.end(spanID, error: "Connection refused after 3 retries")
+
+        let spans = await tracer.allSpans()
+        let span = spans.first { $0.id == spanID }
+
+        XCTAssertNotNil(span)
+        XCTAssertEqual(span?.kind, .retry)
+        if case .error(let msg) = span?.status {
+            XCTAssertTrue(msg.contains("Connection refused"), "Error message should be preserved")
+        } else {
+            XCTFail("Expected .error status, got \(String(describing: span?.status))")
+        }
+    }
+
+    // MARK: 3. Parent-Child Span Relationship
+
+    func testSpanParentChildRelationship() async throws {
+        let tracer = TraceCollector()
+
+        let parentID = await tracer.begin(kind: .llmCall, name: "anthropic_request")
+        let childID = await tracer.begin(
+            kind: .toolExecution,
+            name: "file_write",
+            parentID: parentID,
+            attributes: ["tool": "file_write"]
+        )
+        await tracer.end(childID)
+        await tracer.end(parentID)
+
+        let spans = await tracer.allSpans()
+        let child = spans.first { $0.id == childID }
+
+        XCTAssertEqual(child?.parentID, parentID, "Child span should reference parent")
+        XCTAssertEqual(spans.count, 2)
+    }
+
+    // MARK: 4. LogCollector Structured Fields
+
+    func testLogCollector_structuredFieldsQueryable() async throws {
+        let logger = LogCollector(traceID: UUID())
+
+        await logger.info("routing", "Model selected", fields: [
+            "route.reason": "failure_escalation",
+            "model": "claude-opus-4-6",
+            "consecutive_failures": "3"
+        ])
+
+        await logger.warn("recovery", "Retry backoff applied", fields: [
+            "attempt": "2",
+            "delay_ms": "450",
+            "jitter_factor": "1.12"
+        ])
+
+        await logger.error("breaker", "Circuit breaker tripped", fields: [
+            "state": "open",
+            "failure_count": "5",
+            "window_seconds": "30"
+        ])
+
+        // Query by category
+        let routingLogs = await logger.query(category: "routing")
+        XCTAssertEqual(routingLogs.count, 1)
+        XCTAssertEqual(routingLogs.first?.fields["route.reason"], "failure_escalation")
+
+        // Query by level
+        let errors = await logger.query(level: .error)
+        XCTAssertEqual(errors.count, 1)
+        XCTAssertEqual(errors.first?.fields["state"], "open")
+
+        // Query by substring
+        let jitterLogs = await logger.query(containing: "backoff")
+        XCTAssertEqual(jitterLogs.count, 1)
+        XCTAssertEqual(jitterLogs.first?.fields["jitter_factor"], "1.12")
+
+        // Summary
+        let summary = await logger.summary()
+        XCTAssertEqual(summary.totalEntries, 3)
+        XCTAssertEqual(summary.infoCount, 1)
+        XCTAssertEqual(summary.warnCount, 1)
+        XCTAssertEqual(summary.errorCount, 1)
+        XCTAssertTrue(summary.categories.contains("routing"))
+        XCTAssertTrue(summary.categories.contains("recovery"))
+        XCTAssertTrue(summary.categories.contains("breaker"))
+    }
+
+    // MARK: 5. Trace Summary Aggregation
+
+    func testTraceSummary_countsByKind() async throws {
+        let tracer = TraceCollector()
+
+        let s1 = await tracer.begin(kind: .llmCall, name: "request_1")
+        let s2 = await tracer.begin(kind: .toolExecution, name: "file_read", parentID: s1)
+        let s3 = await tracer.begin(kind: .toolExecution, name: "terminal", parentID: s1)
+        let s4 = await tracer.begin(kind: .retry, name: "recovery_1", parentID: s3)
+
+        await tracer.end(s4)
+        await tracer.end(s3)
+        await tracer.end(s2)
+        await tracer.end(s1)
+
+        let summary = await tracer.summary()
+        XCTAssertEqual(summary.spanCount, 4)
+        // Verify the span kinds were recorded
+        let spans = await tracer.allSpans()
+        let kinds = Set(spans.map(\.kind))
+        XCTAssertTrue(kinds.contains(.llmCall))
+        XCTAssertTrue(kinds.contains(.toolExecution))
+        XCTAssertTrue(kinds.contains(.retry))
+    }
 }

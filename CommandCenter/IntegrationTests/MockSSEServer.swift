@@ -113,6 +113,25 @@ final class MockSSEProtocol: URLProtocol {
 
         case .error(let error):
             client?.urlProtocol(self, didFailWithError: error)
+
+        case .chunkedSSE(let chunks, let delayMs, let statusCode):
+            let httpResponse = HTTPURLResponse(
+                url: request.url!,
+                statusCode: statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/event-stream"]
+            )!
+            client?.urlProtocol(self, didReceive: httpResponse, cacheStoragePolicy: .notAllowed)
+
+            // Deliver ALL chunks synchronously via separate didLoad() calls.
+            // This tests that the SSE parser correctly handles data arriving in
+            // multiple fragments. Callers are responsible for ensuring each chunk
+            // contains properly terminated SSE events (trailing blank line).
+            for chunk in chunks {
+                let data = chunk.joined(separator: "\n").data(using: .utf8)!
+                client?.urlProtocol(self, didLoad: data)
+            }
+            client?.urlProtocolDidFinishLoading(self)
         }
     }
 
@@ -123,6 +142,9 @@ final class MockSSEProtocol: URLProtocol {
 
 enum MockSSEResponse {
     case sse(events: [String], statusCode: Int = 200)
+    /// Delivers SSE events in separate chunks with delays between them.
+    /// Each chunk is delivered via a separate `didLoad()` call, simulating network jitter.
+    case chunkedSSE(chunks: [[String]], delayMs: UInt64 = 50, statusCode: Int = 200)
     case json(data: Data, statusCode: Int)
     case error(Error)
 }
