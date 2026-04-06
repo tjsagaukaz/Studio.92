@@ -30,6 +30,8 @@ struct TaskStep: Identifiable, Equatable, Sendable {
     var status: TaskStepStatus = .pending
     var failureReason: String?
     var retryCount: Int = 0
+    /// When set by PlanAdaptationPolicy, overrides the default model for this step.
+    var recommendedRole: StudioModelRole?
 
     static let maxRetries = 2
 }
@@ -144,6 +146,20 @@ struct TaskPlan: Identifiable, Sendable {
                 steps[idx].status = .skipped
             }
         }
+    }
+
+    /// Mark all pending steps as skipped (used by adaptation policy).
+    mutating func skipAllPending(reason: String) {
+        for idx in steps.indices where steps[idx].status == .pending {
+            steps[idx].status = .skipped
+            steps[idx].failureReason = reason
+        }
+    }
+
+    /// Override the model role for a specific step (used by adaptation policy).
+    mutating func setRecommendedRole(_ role: StudioModelRole, for stepID: String) {
+        guard let idx = steps.firstIndex(where: { $0.id == stepID }) else { return }
+        steps[idx].recommendedRole = role
     }
 
     private func transitiveDependents(of stepID: String) -> Set<String> {
@@ -449,6 +465,60 @@ enum TaskPlanPromptInjection {
     }
 }
 
+// MARK: - Plan Adaptation
+
+/// Outcome-driven adaptations that the executor can apply between steps.
+/// Conservative by design — start with simple cases, expand later.
+enum PlanAdaptation: Equatable, Sendable {
+    /// No change to the plan.
+    case proceed
+    /// Skip all remaining steps (e.g. verification passed, no repair needed).
+    case skipRemaining(reason: String)
+    /// Re-route a specific step to a different model role.
+    case rerouteStep(stepID: String, to: StudioModelRole)
+}
+
+/// Decides how to adapt the plan after each step completes.
+/// All logic is deterministic — no LLM call.
+enum PlanAdaptationPolicy {
+
+    /// Evaluate the plan after a step completes and recommend an adaptation.
+    static func evaluate(
+        plan: TaskPlan,
+        completedStep: TaskStep,
+        result: TaskPlanExecutor.StepResult
+    ) -> PlanAdaptation {
+        // Rule 1: Verification succeeded → skip repair phase.
+        // If verification passed cleanly, there's nothing to repair.
+        if completedStep.phase == .verification && result.succeeded {
+            let pendingRepairIDs = plan.steps
+                .filter { $0.phase == .repair && $0.status == .pending }
+                .map(\.id)
+            if !pendingRepairIDs.isEmpty {
+                return .skipRemaining(reason: "verification_passed")
+            }
+        }
+
+        // Rule 2: Discovery step failed → re-route implementation to escalation.
+        // If we can't even read the codebase, the task needs a stronger model.
+        if completedStep.phase == .discovery && !result.succeeded {
+            if let implStep = plan.steps.first(where: { $0.phase == .implementation && $0.status == .pending }) {
+                return .rerouteStep(stepID: implStep.id, to: .escalation)
+            }
+        }
+
+        // Rule 3: Implementation failed after retry → re-route verification to escalation.
+        // The implementation was already attempted — escalate the verification/fix pass.
+        if completedStep.phase == .implementation && !result.succeeded && completedStep.retryCount >= TaskStep.maxRetries {
+            if let verifyStep = plan.steps.first(where: { $0.phase == .verification && $0.status == .pending }) {
+                return .rerouteStep(stepID: verifyStep.id, to: .escalation)
+            }
+        }
+
+        return .proceed
+    }
+}
+
 // MARK: - Plan Executor
 
 /// Drives a TaskPlan through its steps, invoking runAgentic for each phase.
@@ -514,7 +584,20 @@ actor TaskPlanExecutor {
             if parallelSteps.count > 1 {
                 await executeParallel(steps: parallelSteps, runStep: runStep)
             } else if let step = plan.nextSequentialStep {
-                await executeSequential(step: step, runStep: runStep)
+                let result = await executeSequential(step: step, runStep: runStep)
+
+                // Adaptive plan refinement — evaluate and apply post-step.
+                if let result {
+                    let currentStep = plan.steps.first(where: { $0.id == result.stepID })
+                    if let currentStep {
+                        let adaptation = PlanAdaptationPolicy.evaluate(
+                            plan: plan,
+                            completedStep: currentStep,
+                            result: result
+                        )
+                        await applyAdaptation(adaptation, spanID: spanID)
+                    }
+                }
             }
         }
 
@@ -555,7 +638,7 @@ actor TaskPlanExecutor {
     private func executeSequential(
         step: TaskStep,
         runStep: @escaping @Sendable (TaskStep, String?) async -> StepResult
-    ) async {
+    ) async -> StepResult? {
         plan.markRunning(step.id)
         let supplement = TaskPlanPromptInjection.promptSupplement(for: plan, currentStep: step)
 
@@ -567,7 +650,8 @@ actor TaskPlanExecutor {
                 "dag.step.id": step.id,
                 "dag.step.phase": step.phase.rawValue,
                 "dag.step.intent": step.intent,
-                "dag.step.retry": "\(step.retryCount)"
+                "dag.step.retry": "\(step.retryCount)",
+                "dag.step.rerouted": step.recommendedRole.map(\.rawValue) ?? "none"
             ]
         )
 
@@ -576,6 +660,7 @@ actor TaskPlanExecutor {
         if result.succeeded {
             plan.markCompleted(step.id)
             await tracer.end(stepSpanID)
+            return result
         } else {
             // Retry logic
             if step.retryCount < TaskStep.maxRetries {
@@ -584,7 +669,7 @@ actor TaskPlanExecutor {
                 await tracer.end(stepSpanID, error: result.failureReason ?? "Unknown error")
 
                 // Re-run with retry context
-                var retryStep = plan.steps.first(where: { $0.id == step.id })!
+                let retryStep = plan.steps.first(where: { $0.id == step.id })!
                 plan.markRunning(step.id)
                 let retrySupplement = TaskPlanPromptInjection.promptSupplement(for: plan, currentStep: retryStep)
 
@@ -602,15 +687,18 @@ actor TaskPlanExecutor {
                 if retryResult.succeeded {
                     plan.markCompleted(step.id)
                     await tracer.end(retrySpanID)
+                    return retryResult
                 } else {
                     plan.markFailed(step.id, reason: retryResult.failureReason ?? "Unknown error")
                     plan.skipDependents(of: step.id)
                     await tracer.end(retrySpanID, error: retryResult.failureReason ?? "Unknown error")
+                    return retryResult
                 }
             } else {
                 plan.markFailed(step.id, reason: result.failureReason ?? "Unknown error")
                 plan.skipDependents(of: step.id)
                 await tracer.end(stepSpanID, error: result.failureReason ?? "Unknown error")
+                return result
             }
         }
     }
@@ -652,6 +740,27 @@ actor TaskPlanExecutor {
         }
 
         await tracer.end(parallelSpanID)
+    }
+
+    /// Apply an adaptation decision to the live plan.
+    private func applyAdaptation(_ adaptation: PlanAdaptation, spanID: UUID) async {
+        switch adaptation {
+        case .proceed:
+            break
+
+        case .skipRemaining(let reason):
+            let skippedCount = plan.steps.filter { $0.status == .pending }.count
+            plan.skipAllPending(reason: reason)
+            await tracer.setAttribute("dag.adaptation", value: "skip_remaining", on: spanID)
+            await tracer.setAttribute("dag.adaptation.skipped_count", value: "\(skippedCount)", on: spanID)
+            await tracer.setAttribute("dag.adaptation.reason", value: reason, on: spanID)
+
+        case .rerouteStep(let stepID, let newRole):
+            plan.setRecommendedRole(newRole, for: stepID)
+            await tracer.setAttribute("dag.adaptation", value: "reroute_step", on: spanID)
+            await tracer.setAttribute("dag.adaptation.rerouted_step", value: stepID, on: spanID)
+            await tracer.setAttribute("dag.adaptation.new_role", value: newRole.rawValue, on: spanID)
+        }
     }
 
     private func endSpan(_ spanID: UUID, error: String?) async {
