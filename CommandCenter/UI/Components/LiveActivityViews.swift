@@ -46,8 +46,7 @@ struct ReasoningHUD: View {
                             .combined(with: .offset(y: 10))
                             .animation(.easeOut(duration: 0.28)),
                         removal: .opacity
-                            .combined(with: .scale(scale: 0.97))
-                            .animation(.easeIn(duration: 0.22))
+                            .animation(.easeOut(duration: 1.5))
                     )
                 )
         }
@@ -65,65 +64,62 @@ private struct HUDScrollCard: View {
 
     let lines: [ReasoningLine]
 
-    /// Maximum visible lines before the card reaches its height cap.
     private static let visibleLineCount = 7
 
-    @State private var iconPulse = false
+    @State private var isPulsing = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: StudioSpacing.md) {
-            // Header row
-            HStack(spacing: StudioSpacing.md) {
-                Image(systemName: "cpu")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(
-                        StudioAccentColor.primary.opacity(iconPulse ? 0.95 : 0.45)
-                    )
-                    .shadow(color: StudioAccentColor.primary.opacity(iconPulse ? 0.5 : 0.0), radius: 4)
+        HStack(alignment: .top, spacing: StudioSpacing.lg) {
+
+            // ── Anchor rail ──────────────────────────────────────────────
+            // 3pt cyan heartbeat dot at the top; sheer 1pt hairline below.
+            VStack(spacing: 0) {
+                Circle()
+                    .fill(StudioAccentColor.primary)
+                    .frame(width: 3, height: 3)
+                    .opacity(isPulsing ? 1.0 : 0.20)
                     .onAppear {
-                        withAnimation(StudioMotion.breathe) { iconPulse = true }
+                        withAnimation(
+                            .easeInOut(duration: 1.2).repeatForever(autoreverses: true)
+                        ) { isPulsing = true }
                     }
 
-                Text("Reasoning")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.3))
-                    .tracking(0.5)
-
-                Spacer(minLength: 0)
-
-                // Live pulse badge
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(StudioAccentColor.primary.opacity(iconPulse ? 0.85 : 0.3))
-                        .frame(width: 4, height: 4)
-                    Text("live")
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundStyle(StudioAccentColor.primary.opacity(0.55))
-                }
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(width: 1)
+                    .frame(maxHeight: .infinity)
+                    .padding(.top, 3)
             }
+            .frame(width: 3)
 
-            // Scrolling reasoning ticker — shows up to 7 lines, auto-scrolls to newest.
+            // ── Dissolving ticker ────────────────────────────────────────
             if !lines.isEmpty {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical, showsIndicators: false) {
                         VStack(alignment: .leading, spacing: StudioSpacing.xs) {
                             ForEach(lines) { line in
                                 Text(line.text)
-                                    .reasoningLineStyle(
-                                        opacity: lineOpacity(for: line)
+                                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                                    .foregroundStyle(
+                                        Color(hex: "#7E8794").opacity(lineOpacity(for: line))
                                     )
+                                    .lineLimit(2)
+                                    .truncationMode(.tail)
                                     .id(line.id)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxHeight: CGFloat(Self.visibleLineCount) * 16)
+                    .frame(maxHeight: CGFloat(Self.visibleLineCount) * 15)
                     .mask(
+                        // Top 20% dissolves lines into the background as they scroll up.
+                        // Bottom 10% dissolves the clipping edge of the frame.
                         LinearGradient(
                             stops: [
-                                .init(color: .clear, location: 0),
-                                .init(color: .black, location: 0.18),
-                                .init(color: .black, location: 1.0)
+                                .init(color: .clear,  location: 0.00),
+                                .init(color: .black,  location: 0.20),
+                                .init(color: .black,  location: 0.90),
+                                .init(color: .clear,  location: 1.00)
                             ],
                             startPoint: .top,
                             endPoint: .bottom
@@ -137,37 +133,16 @@ private struct HUDScrollCard: View {
                 }
             }
         }
-        .padding(.horizontal, StudioSpacing.xxl)
-        .padding(.vertical, StudioSpacing.lg)
         .frame(width: 320, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: StudioRadius.lg, style: .continuous)
-                .fill(Color.black.opacity(0.82))
-                .overlay(
-                    RoundedRectangle(cornerRadius: StudioRadius.lg, style: .continuous)
-                        .stroke(Color.white.opacity(0.09), lineWidth: 0.5)
-                )
-        )
-        .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 8)
+        // No background — no card, no border, no shadow. Pure ambient data.
     }
 
-    /// Lines closer to the bottom are brighter; top lines fade out.
+    /// Bottom line is brightest (0.60); each step back fades by 0.07, floor 0.18.
     private func lineOpacity(for line: ReasoningLine) -> Double {
-        guard lines.count > 1 else { return 0.72 }
+        guard lines.count > 1 else { return 0.60 }
         let lastIndex = lines.last?.index ?? 0
         let distance = lastIndex - line.index
-        // Newest line: 0.72, each step back fades by ~0.08, floor at 0.18
-        return max(0.18, 0.72 - Double(distance) * 0.08)
-    }
-}
-
-private extension Text {
-    func reasoningLineStyle(opacity: Double) -> some View {
-        self
-            .font(.system(size: 11, weight: .regular, design: .monospaced))
-            .foregroundStyle(Color(hex: "#7E8794").opacity(opacity))
-            .lineLimit(2)
-            .truncationMode(.tail)
+        return max(0.18, 0.60 - Double(distance) * 0.07)
     }
 }
 
