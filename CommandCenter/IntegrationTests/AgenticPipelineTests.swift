@@ -595,6 +595,31 @@ final class AgenticPipelineTests: XCTestCase {
         let text = accumulatedText(from: events)
         XCTAssertEqual(text, "Reassembled!", "SSE event split across chunks should reassemble correctly")
     }
+
+    // MARK: 16. Single-Byte Streaming — Ultimate Parser Robustness
+
+    func testSingleByteStreamingParsesCorrectly() async throws {
+        // Given: The entire SSE stream is delivered one byte at a time.
+        // This proves the parser is fully delimiter-driven and has zero
+        // reliance on chunk boundaries or transport-level framing.
+        let sseEvents = AnthropicSSE.simpleTextResponse("Byte by byte!")
+
+        MockSSEProtocol.enqueue(.byteAtATime(events: sseEvents))
+
+        let client = makeClient()
+        let stream = await client.run(
+            system: "Test",
+            userMessage: "Single byte test",
+            model: StudioModelStrategy.fullSend
+        )
+
+        let events = await collectEvents(from: stream)
+        let text = accumulatedText(from: events)
+        XCTAssertEqual(text, "Byte by byte!", "Parser must produce correct output when fed one byte at a time")
+
+        let completed = events.contains { if case .completed = $0 { return true }; return false }
+        XCTAssertTrue(completed, "Stream must complete normally under byte-at-a-time delivery")
+    }
 }
 
 // MARK: - B. Recovery & Circuit Breaker Contract Tests

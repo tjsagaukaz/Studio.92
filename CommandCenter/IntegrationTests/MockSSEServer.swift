@@ -132,6 +132,24 @@ final class MockSSEProtocol: URLProtocol {
                 client?.urlProtocol(self, didLoad: data)
             }
             client?.urlProtocolDidFinishLoading(self)
+
+        case .byteAtATime(let events, let statusCode):
+            let httpResponse = HTTPURLResponse(
+                url: request.url!,
+                statusCode: statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/event-stream"]
+            )!
+            client?.urlProtocol(self, didReceive: httpResponse, cacheStoragePolicy: .notAllowed)
+
+            // Deliver the entire SSE stream one byte at a time.
+            // This is the ultimate parser robustness test: proves the parser
+            // is delimiter-driven and has zero reliance on chunk boundaries.
+            let fullData = events.joined(separator: "\n").data(using: .utf8)!
+            for i in 0..<fullData.count {
+                client?.urlProtocol(self, didLoad: fullData[i...i])
+            }
+            client?.urlProtocolDidFinishLoading(self)
         }
     }
 
@@ -145,6 +163,9 @@ enum MockSSEResponse {
     /// Delivers SSE events in separate chunks with delays between them.
     /// Each chunk is delivered via a separate `didLoad()` call, simulating network jitter.
     case chunkedSSE(chunks: [[String]], delayMs: UInt64 = 50, statusCode: Int = 200)
+    /// Delivers the entire SSE stream one byte at a time via separate `didLoad()` calls.
+    /// Proves the parser is fully delimiter-driven with zero chunk-boundary assumptions.
+    case byteAtATime(events: [String], statusCode: Int = 200)
     case json(data: Data, statusCode: Int)
     case error(Error)
 }
