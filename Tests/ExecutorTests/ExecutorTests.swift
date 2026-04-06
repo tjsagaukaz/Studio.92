@@ -273,7 +273,8 @@ final class ExecutorTests: XCTestCase {
         )
 
         let data = try JSONEncoder().encode(request)
-        let dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+
 
         // Verify snake_case keys
         XCTAssertEqual(dict["model"] as? String, "gpt-4.5-preview")

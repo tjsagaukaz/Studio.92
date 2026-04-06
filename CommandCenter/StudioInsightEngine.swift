@@ -322,7 +322,7 @@ struct SidebarAttentionBadge: View {
     let highPriorityCount: Int
 
     var body: some View {
-        if count > 0 {
+        if count >= 1 {
             HStack(spacing: StudioSpacing.sm) {
                 Circle()
                     .fill(highPriorityCount > 0 ? StudioStatusColor.danger : StudioStatusColor.warning)

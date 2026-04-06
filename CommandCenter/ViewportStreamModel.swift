@@ -333,7 +333,6 @@ final class ViewportStreamModel {
         case .errorCard(let e):    return e.command.isEmpty ? "Build Failed" : e.command
         case .approvalGate(let a): return a.title
         case .temporalRevert(let r): return "Revert to \(r.title)"
-        case .temporalRevert(let r): return "Revert to \(r.title)"
         case .none:                break
         }
         switch phase {
