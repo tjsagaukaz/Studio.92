@@ -12,6 +12,8 @@ import SwiftUI
 struct ReasoningHUD: View {
 
     let controller: StreamPhaseController
+    /// Maximum width available in the leading margin. Caller computes this from geometry.
+    var maxWidth: CGFloat = 280
 
     /// Visible while reasoning text is available and the stream is still active.
     private var isVisible: Bool {
@@ -39,7 +41,7 @@ struct ReasoningHUD: View {
 
     var body: some View {
         if isVisible {
-            HUDScrollCard(lines: allLines)
+            HUDScrollCard(lines: allLines, maxWidth: maxWidth)
                 .transition(
                     .asymmetric(
                         insertion: .opacity
@@ -63,6 +65,7 @@ private struct ReasoningLine: Identifiable, Equatable {
 private struct HUDScrollCard: View {
 
     let lines: [ReasoningLine]
+    let maxWidth: CGFloat
 
     private static let visibleLineCount = 7
 
@@ -133,7 +136,7 @@ private struct HUDScrollCard: View {
                 }
             }
         }
-        .frame(width: 320, alignment: .leading)
+        .frame(maxWidth: maxWidth, alignment: .leading)
         // No background — no card, no border, no shadow. Pure ambient data.
     }
 

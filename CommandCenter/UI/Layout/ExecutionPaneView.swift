@@ -153,10 +153,19 @@ struct ExecutionPaneView: View {
                 .environment(\.streamDeepLinkRouter, runner.streamCoordinator.deepLinkRouter)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .topLeading) {
-                    ReasoningHUD(controller: runner.streamCoordinator.phaseController)
+                    GeometryReader { geo in
+                        // Available leading space = gap between pane edge and chat column.
+                        // Subtract two sectionGap widths (leading inset + buffer from column).
+                        let leadingMargin = (geo.size.width - executionColumnWidth) / 2
+                        let availableWidth = max(60, leadingMargin - StudioSpacing.sectionGap * 2)
+                        ReasoningHUD(
+                            controller: runner.streamCoordinator.phaseController,
+                            maxWidth: availableWidth
+                        )
                         .padding(.top, StudioSpacing.section)
                         .padding(.leading, StudioSpacing.sectionGap)
-                        .allowsHitTesting(false)
+                    }
+                    .allowsHitTesting(false)
                 }
                 .overlay(alignment: .topTrailing) {
                     if let pending = todoGate.pendingPlan {
