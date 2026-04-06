@@ -1115,6 +1115,8 @@ struct StreamingMarkdownRevealView: View {
 
     @State private var revealedCount = 0
     @State private var revealDriverID = UUID()
+    /// Briefly true when new characters land — drives the blur-materialize effect.
+    @State private var isMaterializing = false
 
     var body: some View {
         MarkdownMessageContent(
@@ -1124,6 +1126,9 @@ struct StreamingMarkdownRevealView: View {
             tone: tone
         )
         .equatable()
+        .blur(radius: isMaterializing ? 2.5 : 0)
+        .opacity(isMaterializing ? 0.55 : 1.0)
+        .animation(.easeOut(duration: 0.15), value: isMaterializing)
         .overlay(alignment: .bottomTrailing) {
             if showsCursor {
                 StreamingCursorView()
@@ -1139,6 +1144,15 @@ struct StreamingMarkdownRevealView: View {
         }
         .onChange(of: text) { _, _ in
             revealDriverID = UUID()
+        }
+        .onChange(of: revealedCount) { _, _ in
+            // Flash-materialize: briefly set true, then immediately clear.
+            // The 0.15s easeOut on isMaterializing creates the dissolve-in.
+            isMaterializing = true
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(1))
+                isMaterializing = false
+            }
         }
     }
 

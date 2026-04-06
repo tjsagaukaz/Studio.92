@@ -111,10 +111,7 @@ struct MarkdownListView: View {
             ForEach(items) { item in
                 VStack(alignment: .leading, spacing: StudioSpacing.sm) {
                     HStack(alignment: .top, spacing: StudioSpacing.lg) {
-                        Text(item.marker.labelText)
-                            .font(markerFont(for: item.marker))
-                            .foregroundStyle(StudioTextColor.tertiary)
-                            .frame(minWidth: 24, alignment: .trailing)
+                        ListMarkerView(marker: item.marker, tone: tone)
 
                         MarkdownInlineText(text: item.text, tone: tone)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -128,13 +125,39 @@ struct MarkdownListView: View {
             }
         }
     }
+}
 
-    private func markerFont(for marker: MarkdownListItem.Marker) -> Font {
+/// Renders the list marker: bullet dot for unordered, .ultraThinMaterial
+/// circular badge with centred number for ordered lists.
+private struct ListMarkerView: View {
+
+    let marker: MarkdownListItem.Marker
+    let tone: MarkdownMessageContent.Tone
+
+    private var badgeSize: CGFloat { tone == .meta ? 16 : 18 }
+    private var fontSize: CGFloat { tone == .meta ? 8 : 9 }
+
+    var body: some View {
         switch marker {
         case .unordered:
-            return .system(size: tone == .meta ? StudioChatLayout.metaFontSize : StudioChatLayout.bodyFontSize, weight: .regular)
-        case .ordered:
-            return .system(size: tone == .meta ? StudioChatLayout.metaFontSize : StudioChatLayout.bodyFontSize, weight: .medium, design: .monospaced)
+            Circle()
+                .fill(StudioTextColor.tertiary.opacity(0.45))
+                .frame(width: 4, height: 4)
+                .padding(.top, (badgeSize - 4) / 2 + 2) // vertically align with cap height
+                .frame(width: badgeSize, alignment: .center)
+
+        case .ordered(let n):
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                Circle()
+                    .stroke(Color.white.opacity(0.10), lineWidth: 0.5)
+                Text("\(n)")
+                    .font(.system(size: fontSize, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(StudioTextColor.secondary)
+            }
+            .frame(width: badgeSize, height: badgeSize)
+            .padding(.top, 1)
         }
     }
 }
@@ -212,6 +235,39 @@ struct MarkdownTableView: View {
     }
 }
 
+// MARK: - Insight Card (blockquote upgrade)
+
+/// A blockquote rendered as a spatial object: #14181D card, 2pt Electric Cyan
+/// left rail, secondary text. Architectural insights read as cards, not annotations.
+private struct InsightCard: View {
+
+    let text: String
+    let tone: MarkdownMessageContent.Tone
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            // 2pt cyan rail
+            RoundedRectangle(cornerRadius: 1, style: .continuous)
+                .fill(StudioAccentColor.primary.opacity(0.70))
+                .frame(width: 2)
+
+            MarkdownInlineText(text: text, tone: tone)
+                .foregroundStyle(StudioTextColor.secondary)
+                .padding(.horizontal, StudioSpacing.xl)
+                .padding(.vertical, StudioSpacing.lg)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(hex: "#14181D"))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
 struct MarkdownMessageContent: View, Equatable {
 
     enum Tone: Equatable {
@@ -254,20 +310,8 @@ struct MarkdownMessageContent: View, Equatable {
                             .padding(.bottom, StudioChatLayout.messageInternalSpacing)
                     }
                 case .quote(let value):
-                    HStack(alignment: .top, spacing: StudioSpacing.md) {
-                        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                            .fill(StudioAccentColor.muted.opacity(0.6))
-                            .frame(width: 3)
-                        MarkdownInlineText(text: value, tone: tone)
-                            .foregroundStyle(StudioTextColor.secondary)
-                    }
-                    .padding(.vertical, 8)
-                    .padding(.trailing, 12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.adaptive(light: Color.black.opacity(0.025), dark: Color.white.opacity(0.03)))
-                    )
-                    .padding(.bottom, StudioChatLayout.paragraphSpacing)
+                    InsightCard(text: value, tone: tone)
+                        .padding(.bottom, StudioChatLayout.paragraphSpacing)
                 case .code(let language, let code, let targetHint):
                     CodeBlockCard(
                         language: language,
