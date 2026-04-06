@@ -1,22 +1,34 @@
 // ToolExecutor.swift
 // Studio.92 — Agent Council
 // Dispatches tool_use requests from the model to local handlers.
-// Plan/review modes stay scoped to the project root. Full-send mode can reach
-// the wider machine when the user explicitly enables it.
 
 import Foundation
+
+/// Thread-safe wrapper for a Process reference, used to tie process lifetime to Swift Task cancellation.
+private final class CancellableProcessRef: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+
+    func set(_ p: Process) {
+        lock.lock()
+        process = p
+        lock.unlock()
+    }
+
+    func terminate() {
+        lock.lock()
+        let p = process
+        lock.unlock()
+        guard let p, p.isRunning else { return }
+        p.terminate()
+    }
+}
 
 /// Events emitted by the tool executor, observable by the UI layer.
 public enum ToolExecutionEvent: Sendable {
     case started(toolCallID: String, name: String, input: [String: AnyCodableValue])
     case output(toolCallID: String, line: String)
     case completed(toolCallID: String, result: String, isError: Bool)
-}
-
-public enum AutonomyMode: String, CaseIterable, Sendable {
-    case plan
-    case review
-    case fullSend
 }
 
 public struct ToolExecutionOutcome: Sendable {
@@ -38,13 +50,21 @@ public struct ToolExecutionOutcome: Sendable {
 public actor ToolExecutor {
 
     private let projectRoot: URL
-    private let autonomyMode: AutonomyMode
+    private let permissionPolicy: ToolPermissionPolicy
+    private let sandbox: SandboxPolicy
     private let eventContinuation: AsyncStream<ToolExecutionEvent>.Continuation
     public  let events: AsyncStream<ToolExecutionEvent>
+    private let tracer: TraceCollector?
+    private let recovery: RecoveryExecutor
+    private let apiKey: String?
 
-    public init(projectRoot: URL, autonomyMode: AutonomyMode = .review) {
+    public init(projectRoot: URL, allowMachineWideAccess: Bool = true, tracer: TraceCollector? = nil, apiKey: String? = nil) {
         self.projectRoot = projectRoot
-        self.autonomyMode = autonomyMode
+        self.permissionPolicy = ToolPermissionPolicy()
+        self.sandbox = SandboxPolicy(projectRoot: projectRoot, allowMachineWideAccess: allowMachineWideAccess)
+        self.tracer = tracer
+        self.apiKey = apiKey
+        self.recovery = RecoveryExecutor(tracer: tracer)
         let (stream, continuation) = AsyncStream<ToolExecutionEvent>.makeStream()
         self.events = stream
         self.eventContinuation = continuation
@@ -62,41 +82,55 @@ public actor ToolExecutor {
     ) async -> ToolExecutionOutcome {
         eventContinuation.yield(.started(toolCallID: toolCallID, name: name, input: input))
 
-        if let permissionError = permissionError(for: name) {
-            eventContinuation.yield(.completed(toolCallID: toolCallID, result: permissionError, isError: true))
-            return ToolExecutionOutcome(text: permissionError, isError: true)
+        if case .blocked(let reason) = permissionPolicy.check(name) {
+            let toolError = ToolError.permissionBlocked(tool: name, reason: reason)
+            let spanID = await tracer?.begin(
+                kind: .permissionCheck,
+                name: "permission_blocked",
+                attributes: ["tool": name]
+            )
+            if let spanID { await tracer?.end(spanID, error: reason) }
+            let result = await recovery.attemptRecovery(for: toolError) { nil }
+            let outcome = ToolExecutionOutcome(text: result.displayText, isError: result.isError)
+            eventContinuation.yield(.completed(toolCallID: toolCallID, result: outcome.displayText, isError: outcome.isError))
+            return outcome
         }
 
         let outcome: ToolExecutionOutcome
         do {
-            switch name {
-            case "file_read":
+            guard let tool = ToolName(normalizing: name) else {
+                outcome = ToolExecutionOutcome(text: "Unknown tool: \(name)", isError: true)
+                eventContinuation.yield(.completed(toolCallID: toolCallID, result: outcome.displayText, isError: outcome.isError))
+                return outcome
+            }
+            switch tool {
+            case .fileRead:
                 let raw = try await executeFileRead(input)
                 outcome = ToolExecutionOutcome(text: raw.0, isError: raw.1)
-            case "file_write":
+            case .fileWrite:
                 let raw = try await executeFileWrite(input)
                 outcome = ToolExecutionOutcome(text: raw.0, isError: raw.1)
-            case "file_patch":
+            case .filePatch:
                 let raw = try await executeFilePatch(input)
                 outcome = ToolExecutionOutcome(text: raw.0, isError: raw.1)
-            case "list_files":
+            case .listFiles:
                 let raw = try await executeListFiles(input)
                 outcome = ToolExecutionOutcome(text: raw.0, isError: raw.1)
-            case "delegate_to_explorer":
+            case .delegateToExplorer:
                 outcome = try await executeDelegateToExplorer(toolCallID: toolCallID, input)
-            case "delegate_to_reviewer":
+            case .delegateToReviewer:
                 outcome = try await executeDelegateToReviewer(toolCallID: toolCallID, input)
-            case "terminal":
-                let raw = try await executeTerminal(input)
-                outcome = ToolExecutionOutcome(text: raw.0, isError: raw.1)
-            case "web_search":
+            case .terminal:
+                outcome = try await executeTerminalWithRecovery(toolCallID: toolCallID, name: name, input: input)
+            case .webSearch:
                 outcome = try await executeWebSearch(input, toolCallID: toolCallID)
-            case "deploy_to_testflight":
+            case .deployToTestFlight:
                 let raw = try await executeDeployToTestFlight(toolCallID: toolCallID, input)
                 outcome = ToolExecutionOutcome(text: raw.0, isError: raw.1)
-            default:
-                outcome = ToolExecutionOutcome(text: "Unknown tool: \(name)", isError: true)
             }
+        } catch let toolError as ToolError {
+            let result = await recovery.attemptRecovery(for: toolError) { nil }
+            outcome = ToolExecutionOutcome(text: result.displayText, isError: result.isError)
         } catch {
             outcome = ToolExecutionOutcome(text: "Tool execution error: \(error.localizedDescription)", isError: true)
         }
@@ -105,22 +139,7 @@ public actor ToolExecutor {
         return outcome
     }
 
-    private func permissionError(for toolName: String) -> String? {
-        switch autonomyMode {
-        case .plan:
-            if ["file_write", "file_patch", "terminal", "deploy_to_testflight"].contains(toolName) {
-                return "System Error: User has restricted your permissions to Plan mode. You cannot execute this action."
-            }
-            return nil
-        case .review:
-            if ["file_write", "file_patch", "deploy_to_testflight"].contains(toolName) {
-                return "System Error: User has restricted your permissions to Review mode. You cannot execute this action. Present the proposed code in the conversation for manual diff approval instead."
-            }
-            return nil
-        case .fullSend:
-            return nil
-        }
-    }
+
 
     // MARK: - File Read
 
@@ -128,8 +147,8 @@ public actor ToolExecutor {
         guard let path = input["path"]?.stringValue else {
             return ("Missing required parameter: path", true)
         }
-        let url = resolvedURL(for: path)
-        guard sandboxCheck(url) else {
+        let url = sandbox.resolvedURL(for: path)
+        guard sandbox.check(url) else {
             return ("Access denied: path is outside the project directory.", true)
         }
         guard FileManager.default.fileExists(atPath: url.path) else {
@@ -151,8 +170,8 @@ public actor ToolExecutor {
               let content = input["content"]?.stringValue else {
             return ("Missing required parameters: path, content", true)
         }
-        let url = resolvedURL(for: path)
-        guard sandboxCheck(url) else {
+        let url = sandbox.resolvedURL(for: path)
+        guard sandbox.check(url) else {
             return ("Access denied: path is outside the project directory.", true)
         }
         // Create intermediate directories.
@@ -171,8 +190,8 @@ public actor ToolExecutor {
               let newString = input["new_string"]?.stringValue else {
             return ("Missing required parameters: path, old_string, new_string", true)
         }
-        let url = resolvedURL(for: path)
-        guard sandboxCheck(url) else {
+        let url = sandbox.resolvedURL(for: path)
+        guard sandbox.check(url) else {
             return ("Access denied: path is outside the project directory.", true)
         }
         guard FileManager.default.fileExists(atPath: url.path) else {
@@ -197,8 +216,8 @@ public actor ToolExecutor {
         let recursive: Bool
         if case .bool(let b) = input["recursive"] { recursive = b } else { recursive = false }
 
-        let url = pathStr.map { resolvedURL(for: $0) } ?? projectRoot
-        guard sandboxCheck(url) else {
+        let url = pathStr.map { sandbox.resolvedURL(for: $0) } ?? projectRoot
+        guard sandbox.check(url) else {
             return ("Access denied: path is outside the project directory.", true)
         }
 
@@ -245,63 +264,185 @@ public actor ToolExecutor {
 
     // MARK: - Terminal
 
-    private func executeTerminal(_ input: [String: AnyCodableValue]) async throws -> (String, Bool) {
+    private func executeTerminal(toolCallID: String, input: [String: AnyCodableValue]) async throws -> (String, Bool) {
         guard let command = input["command"]?.stringValue else {
             return ("Missing required parameter: command", true)
         }
         let timeoutSec: Int
         if case .int(let t) = input["timeout"] { timeoutSec = min(t, 120) } else { timeoutSec = 30 }
 
-        let process = Process()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
+        let projectRoot = projectRoot
+        let environment = ProcessInfo.processInfo.environment
+        let eventContinuation = self.eventContinuation
 
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-c", command]
-        process.currentDirectoryURL = projectRoot
-        process.standardOutput = stdoutPipe
-        process.standardError  = stderrPipe
-        process.environment = ProcessInfo.processInfo.environment
+        let processRef = CancellableProcessRef()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                processRef.set(process)
+                let stdoutPipe = Pipe()
+                let stderrPipe = Pipe()
+                let lock = NSLock()
+                var outputLines: [String] = []
+                var stdoutBuffer = ""
+                var stderrBuffer = ""
+                var didTimeout = false
 
-        try process.run()
+                func emitBufferedLines(from buffer: inout String, isError: Bool) {
+                    let parts = buffer.components(separatedBy: "\n")
+                    let trailing = buffer.hasSuffix("\n") ? "" : (parts.last ?? "")
+                    let completeLines = buffer.hasSuffix("\n") ? parts.dropLast() : parts.dropLast()
 
-        // Timeout handling.
-        let timeoutTask = Task {
-            try await Task.sleep(nanoseconds: UInt64(timeoutSec) * 1_000_000_000)
-            if process.isRunning { process.terminate() }
+                    for line in completeLines where !line.isEmpty {
+                        let rendered = isError ? "[stderr] \(line)" : String(line)
+                        lock.lock()
+                        outputLines.append(rendered)
+                        lock.unlock()
+                        eventContinuation.yield(.output(toolCallID: toolCallID, line: rendered))
+                    }
+
+                    buffer = trailing
+                }
+
+                process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+                process.arguments = ["-c", command]
+                process.currentDirectoryURL = projectRoot
+                process.standardOutput = stdoutPipe
+                process.standardError = stderrPipe
+                process.environment = environment
+
+                stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    guard !data.isEmpty else { return }
+                    stdoutBuffer += String(decoding: data, as: UTF8.self)
+                    emitBufferedLines(from: &stdoutBuffer, isError: false)
+                }
+
+                stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    guard !data.isEmpty else { return }
+                    stderrBuffer += String(decoding: data, as: UTF8.self)
+                    emitBufferedLines(from: &stderrBuffer, isError: true)
+                }
+
+                do {
+                    try process.run()
+                } catch {
+                    stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                    stderrPipe.fileHandleForReading.readabilityHandler = nil
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                let semaphore = DispatchSemaphore(value: 0)
+                process.terminationHandler = { _ in
+                    semaphore.signal()
+                }
+
+                let waitResult = semaphore.wait(timeout: .now() + .seconds(timeoutSec))
+                if waitResult == .timedOut, process.isRunning {
+                    didTimeout = true
+                    process.terminate()
+                    _ = semaphore.wait(timeout: .now() + 5)
+                }
+
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+
+                stdoutBuffer += String(decoding: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                stderrBuffer += String(decoding: stderrPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+
+                emitBufferedLines(from: &stdoutBuffer, isError: false)
+                emitBufferedLines(from: &stderrBuffer, isError: true)
+
+                if !stdoutBuffer.isEmpty {
+                    lock.lock()
+                    outputLines.append(stdoutBuffer)
+                    lock.unlock()
+                    eventContinuation.yield(.output(toolCallID: toolCallID, line: stdoutBuffer))
+                }
+                if !stderrBuffer.isEmpty {
+                    let rendered = "[stderr] \(stderrBuffer)"
+                    lock.lock()
+                    outputLines.append(rendered)
+                    lock.unlock()
+                    eventContinuation.yield(.output(toolCallID: toolCallID, line: rendered))
+                }
+
+                lock.lock()
+                var result = outputLines.joined(separator: "\n")
+                lock.unlock()
+
+                if result.isEmpty {
+                    result = "(no output)"
+                }
+
+                let exitCode = didTimeout ? -1 : process.terminationStatus
+                let isError = didTimeout || exitCode != 0
+                if didTimeout {
+                    result += "\n[terminated after \(timeoutSec)s timeout]"
+                } else if exitCode != 0 {
+                    result += "\n[exit code: \(exitCode)]"
+                }
+
+                if result.count > 50_000 {
+                    result = String(result.prefix(50_000)) + "\n\n[Truncated — output exceeds 50,000 characters]"
+                }
+
+                continuation.resume(returning: (result, isError))
+            }
+        }
+        } onCancel: {
+            processRef.terminate()
+        }
+    }
+    // MARK: - Terminal with Recovery
+
+    /// Wraps `executeTerminal` with typed error classification and retry logic.
+    private func executeTerminalWithRecovery(
+        toolCallID: String,
+        name: String,
+        input: [String: AnyCodableValue]
+    ) async throws -> ToolExecutionOutcome {
+        guard input["command"]?.stringValue != nil else {
+            throw ToolError.invalidInput(tool: name, reason: "Missing required parameter: command")
+        }
+        let timeoutSec: Int
+        if case .int(let t) = input["timeout"] { timeoutSec = min(t, 120) } else { timeoutSec = 30 }
+
+        let (result, isError) = try await executeTerminal(toolCallID: toolCallID, input: input)
+
+        guard isError else {
+            return ToolExecutionOutcome(text: result, isError: false)
         }
 
-        process.waitUntilExit()
-        timeoutTask.cancel()
-
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        let stdout = String(decoding: stdoutData, as: UTF8.self)
-        let stderr = String(decoding: stderrData, as: UTF8.self)
-
-        let exitCode = process.terminationStatus
-
-        var result = ""
-        if !stdout.isEmpty { result += stdout }
-        if !stderr.isEmpty { result += (result.isEmpty ? "" : "\n") + "[stderr]\n" + stderr }
-        if result.isEmpty  { result = "(no output)" }
-
-        // Emit output lines for UI.
-        for line in result.components(separatedBy: "\n") {
-            eventContinuation.yield(.output(toolCallID: "", line: line))
+        // Classify the failure.
+        let toolError: ToolError
+        if result.contains("[terminated after") && result.contains("timeout]") {
+            toolError = .timeout(tool: name, elapsed: TimeInterval(timeoutSec))
+        } else {
+            // Extract exit code from the "[exit code: N]" suffix if present.
+            let exitCode = extractExitCode(from: result) ?? 1
+            toolError = .executionFailed(tool: name, stderr: result, exitCode: exitCode)
         }
 
-        let isError = exitCode != 0
-        if isError {
-            result += "\n[exit code: \(exitCode)]"
+        // Apply recovery strategy.
+        let recoveryResult = await recovery.attemptRecovery(for: toolError) { [weak self] in
+            guard let self else { return nil }
+            return try await self.executeTerminal(toolCallID: toolCallID, input: input)
         }
 
-        // Truncate massive output.
-        if result.count > 50_000 {
-            result = String(result.prefix(50_000)) + "\n\n[Truncated — output exceeds 50,000 characters]"
-        }
+        return ToolExecutionOutcome(text: recoveryResult.displayText, isError: recoveryResult.isError)
+    }
 
-        return (result, isError)
+    /// Parse "[exit code: N]" from terminal output.
+    private func extractExitCode(from output: String) -> Int32? {
+        guard let range = output.range(of: "[exit code: ", options: .backwards) else { return nil }
+        let rest = output[range.upperBound...]
+        guard let endBracket = rest.firstIndex(of: "]") else { return nil }
+        return Int32(rest[..<endBracket])
     }
 
     // MARK: - Web Search
@@ -317,10 +458,12 @@ public actor ToolExecutor {
         }
 
         let result = try await runResearcher(query: query)
+        defer { try? FileManager.default.removeItem(at: result.outputDir) }
         let stderrLines = result.stderr
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+        let stderrDetails = stderrLines.joined(separator: "\n")
 
         if emitProgress {
             for line in stderrLines {
@@ -329,15 +472,15 @@ public actor ToolExecutor {
         }
 
         guard result.exitCode == 0 else {
-            let message = "Web search failed, please rely on internal knowledge."
+            let message = "Web search failed with exit code \(result.exitCode)."
             return ToolExecutionOutcome(
-                text: stderrLines.isEmpty ? message : "\(message)\n\n\(stderrLines.joined(separator: "\n"))",
+                text: stderrLines.isEmpty ? message : "\(message)\n\n\(stderrDetails)",
                 isError: true
             )
         }
 
-        let contextPack = readContextPack().trimmingCharacters(in: .whitespacesAndNewlines)
-        let searchResultBlocks = readContextPackResults().compactMap { result -> ToolResultContentBlock? in
+        let contextPack = readContextPack(from: result.outputDir).trimmingCharacters(in: .whitespacesAndNewlines)
+        let searchResultBlocks = readContextPackResults(from: result.outputDir).compactMap { result -> ToolResultContentBlock? in
             let source = result.url.trimmingCharacters(in: .whitespacesAndNewlines)
             let title = result.title.trimmingCharacters(in: .whitespacesAndNewlines)
             let snippet = result.snippet.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -370,10 +513,19 @@ public actor ToolExecutor {
 
         let stdout = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         if !stdout.isEmpty {
-            return ToolExecutionOutcome(text: stdout, isError: false)
+            var message = "Web search completed without usable results."
+            message += "\n\n\(stdout)"
+            if !stderrDetails.isEmpty {
+                message += "\n\n\(stderrDetails)"
+            }
+            return ToolExecutionOutcome(text: message, isError: true)
         }
 
-        return ToolExecutionOutcome(text: "Web search failed, please rely on internal knowledge.", isError: true)
+        if !stderrDetails.isEmpty {
+            return ToolExecutionOutcome(text: "Web search completed without usable results.\n\n\(stderrDetails)", isError: true)
+        }
+
+        return ToolExecutionOutcome(text: "Web search completed without usable results.", isError: true)
     }
 
     // MARK: - Delegation
@@ -393,22 +545,19 @@ public actor ToolExecutor {
             : targetDirectories.joined(separator: ", ")
         eventContinuation.yield(.output(toolCallID: toolCallID, line: "Spawning Workspace Explorer for \(displayTargets)"))
 
-        let client = try ClaudeAPIClient()
-        let manager = SubAgentManager(client: client)
-        let summary = try await manager.run(
-            spec: .init(
-                systemPrompt: """
-                You are Workspace Explorer, a fast read-only codebase scout.
-                Stay focused on the objective and read only what materially helps. Prefer file_read, list_files, and web_search when they reduce guesswork.
-                Return a concise, high-density summary of structure, data flow, mismatches, and risks. Keep it practical. Do not propose patches or dump raw transcripts.
-                """,
-                userPrompt: explorerPrompt(
-                    objective: objective,
-                    targetDirectories: targetDirectories
-                ),
-                model: .haiku,
-                tools: [AgentTools.fileRead, AgentTools.listFiles, AgentTools.webSearch]
-            ),
+        let handoffContext = HandoffContext(
+            role: .explorer,
+            guardrails: SubagentGuardrails.forSubagent(parentSandbox: sandbox),
+            tracer: tracer,
+            parentSpanID: nil,
+            apiKey: apiKey
+        )
+
+        let executor = HandoffExecutor(projectRoot: projectRoot, context: handoffContext)
+        let outcome = await executor.runExplorer(
+            objective: objective,
+            targetDirectories: targetDirectories,
+            model: .haiku,
             toolHandler: { [weak self] name, nestedInput in
                 guard let self else {
                     return ToolExecutionOutcome(text: "Explorer tool handler unavailable.", isError: true)
@@ -417,11 +566,81 @@ public actor ToolExecutor {
             }
         )
 
-        return ToolExecutionOutcome(
-            displayText: "Workspace Explorer returned findings.",
-            toolResultContent: .text(summary),
-            isError: false
-        )
+        // If the subagent hit its iteration limit, escalate: Haiku → Sonnet → Opus.
+        if case .escalated = outcome {
+            eventContinuation.yield(.output(toolCallID: toolCallID, line: "Explorer hit iteration limit — escalating to Sonnet."))
+            let sonnetSpanID = await tracer?.begin(
+                kind: .retry,
+                name: "subagent_escalation",
+                attributes: [
+                    "routing.reason": "retry_escalation",
+                    "escalation.from_model": "haiku",
+                    "escalation.to_model": "sonnet",
+                    "escalation.trigger": "iteration_limit",
+                    "escalation.role": "explorer"
+                ]
+            )
+            let sonnetOutcome = await executor.runExplorer(
+                objective: objective,
+                targetDirectories: targetDirectories,
+                model: .sonnet,
+                toolHandler: { [weak self] name, nestedInput in
+                    guard let self else {
+                        return ToolExecutionOutcome(text: "Explorer tool handler unavailable.", isError: true)
+                    }
+                    return await self.executeSubagentTool(name: name, input: nestedInput)
+                }
+            )
+            if let sonnetSpanID {
+                if case .escalated = sonnetOutcome {
+                    await tracer?.end(sonnetSpanID, error: "sonnet_escalated")
+                } else if case .failed = sonnetOutcome {
+                    await tracer?.end(sonnetSpanID, error: "sonnet_failed")
+                } else {
+                    await tracer?.end(sonnetSpanID)
+                }
+            }
+
+            // If Sonnet also hit its limit, final escalation to Opus.
+            if case .escalated = sonnetOutcome {
+                eventContinuation.yield(.output(toolCallID: toolCallID, line: "Sonnet also hit limit — final escalation to Opus."))
+                let opusSpanID = await tracer?.begin(
+                    kind: .retry,
+                    name: "subagent_escalation",
+                    attributes: [
+                        "routing.reason": "retry_escalation",
+                        "escalation.from_model": "sonnet",
+                        "escalation.to_model": "opus",
+                        "escalation.trigger": "iteration_limit",
+                        "escalation.role": "explorer"
+                    ]
+                )
+                let opusOutcome = await executor.runExplorer(
+                    objective: objective,
+                    targetDirectories: targetDirectories,
+                    model: .opus,
+                    toolHandler: { [weak self] name, nestedInput in
+                        guard let self else {
+                            return ToolExecutionOutcome(text: "Explorer tool handler unavailable.", isError: true)
+                        }
+                        return await self.executeSubagentTool(name: name, input: nestedInput)
+                    }
+                )
+                if let opusSpanID {
+                    if case .failed = opusOutcome {
+                        await tracer?.end(opusSpanID, error: "escalation_failed")
+                    } else {
+                        await tracer?.end(opusSpanID)
+                    }
+                }
+                return toolExecutionOutcome(from: opusOutcome, displayPrefix: "Workspace Explorer (Opus)")
+            }
+
+            // Sonnet completed (not escalated) — return its result.
+            return toolExecutionOutcome(from: sonnetOutcome, displayPrefix: "Workspace Explorer (Sonnet)")
+        }
+
+        return toolExecutionOutcome(from: outcome, displayPrefix: "Workspace Explorer")
     }
 
     private func executeDelegateToReviewer(
@@ -440,22 +659,19 @@ public actor ToolExecutor {
         let focusTarget = filesToReview.count == 1 ? filesToReview[0] : "\(filesToReview.count) files"
         eventContinuation.yield(.output(toolCallID: toolCallID, line: "Code Reviewer auditing \(focusTarget)"))
 
-        let client = try ClaudeAPIClient()
-        let manager = SubAgentManager(client: client)
-        let summary = try await manager.run(
-            spec: .init(
-                systemPrompt: """
-                You are Code Reviewer, a sharp senior iOS reviewer.
-                Audit only the provided files through the requested lens and return a short list of the most important findings.
-                Stay read-only. Use file_read to inspect the files and list_files only for a tiny amount of nearby context. Do not rewrite code, and only quote tiny snippets when they are essential to explain a real issue.
-                """,
-                userPrompt: reviewerPrompt(
-                    filesToReview: filesToReview,
-                    focusArea: focusArea
-                ),
-                model: .sonnet,
-                tools: [AgentTools.fileRead, AgentTools.listFiles]
-            ),
+        let handoffContext = HandoffContext(
+            role: .reviewer,
+            guardrails: SubagentGuardrails.forSubagent(parentSandbox: sandbox),
+            tracer: tracer,
+            parentSpanID: nil,
+            apiKey: apiKey
+        )
+
+        let executor = HandoffExecutor(projectRoot: projectRoot, context: handoffContext)
+        let outcome = await executor.runReviewer(
+            filesToReview: filesToReview,
+            focusArea: focusArea,
+            model: .sonnet,
             toolHandler: { [weak self] name, nestedInput in
                 guard let self else {
                     return ToolExecutionOutcome(text: "Reviewer tool handler unavailable.", isError: true)
@@ -464,11 +680,68 @@ public actor ToolExecutor {
             }
         )
 
-        return ToolExecutionOutcome(
-            displayText: "Code Reviewer returned findings.",
-            toolResultContent: .text(summary),
-            isError: false
-        )
+        // If the subagent hit its iteration limit, retry with Opus.
+        if case .escalated = outcome {
+            eventContinuation.yield(.output(toolCallID: toolCallID, line: "Reviewer hit iteration limit — escalating to Opus."))
+            let escalationSpanID = await tracer?.begin(
+                kind: .retry,
+                name: "subagent_escalation",
+                attributes: [
+                    "routing.reason": "retry_escalation",
+                    "escalation.from_model": "sonnet",
+                    "escalation.to_model": "opus",
+                    "escalation.trigger": "iteration_limit",
+                    "escalation.role": "reviewer"
+                ]
+            )
+            let retryOutcome = await executor.runReviewer(
+                filesToReview: filesToReview,
+                focusArea: focusArea,
+                model: .opus,
+                toolHandler: { [weak self] name, nestedInput in
+                    guard let self else {
+                        return ToolExecutionOutcome(text: "Reviewer tool handler unavailable.", isError: true)
+                    }
+                    return await self.executeSubagentTool(name: name, input: nestedInput)
+                }
+            )
+            if let escalationSpanID {
+                if case .failed = retryOutcome {
+                    await tracer?.end(escalationSpanID, error: "escalation_failed")
+                } else {
+                    await tracer?.end(escalationSpanID)
+                }
+            }
+            return toolExecutionOutcome(from: retryOutcome, displayPrefix: "Code Reviewer (Opus)")
+        }
+
+        return toolExecutionOutcome(from: outcome, displayPrefix: "Code Reviewer")
+    }
+
+    /// Convert a typed HandoffOutcome into the ToolExecutionOutcome the orchestrator expects.
+    private func toolExecutionOutcome(from handoff: HandoffOutcome, displayPrefix: String) -> ToolExecutionOutcome {
+        switch handoff {
+        case .completed(let result):
+            let filesNote = result.filesExamined.isEmpty
+                ? ""
+                : " (\(result.filesExamined.count) files examined)"
+            return ToolExecutionOutcome(
+                displayText: "\(displayPrefix) returned findings.\(filesNote)",
+                toolResultContent: .text(result.summary),
+                isError: false
+            )
+        case .escalated(let reason, let result):
+            let filesNote = result.filesExamined.isEmpty
+                ? ""
+                : " (\(result.filesExamined.count) files examined)"
+            return ToolExecutionOutcome(
+                displayText: "\(displayPrefix) escalated: \(reason).\(filesNote)",
+                toolResultContent: .text(result.summary),
+                isError: false
+            )
+        case .failed(let error):
+            return ToolExecutionOutcome(text: "\(displayPrefix) failed: \(error)", isError: true)
+        }
     }
 
     // MARK: - Deployment
@@ -491,9 +764,13 @@ public actor ToolExecutor {
         let continuation = eventContinuation
         continuation.yield(.output(toolCallID: toolCallID, line: "$ fastlane \(effectiveLane)"))
 
-        return try await withCheckedThrowingContinuation { continuationResult in
+        let processRef = CancellableProcessRef()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuationResult in
             DispatchQueue.global(qos: .userInitiated).async { [projectRoot] in
                 let process = Process()
+                processRef.set(process)
                 let stdoutPipe = Pipe()
                 let stderrPipe = Pipe()
                 var outputLines: [String] = []
@@ -542,7 +819,20 @@ public actor ToolExecutor {
                     return
                 }
 
-                process.waitUntilExit()
+                let semaphore = DispatchSemaphore(value: 0)
+                process.terminationHandler = { _ in
+                    semaphore.signal()
+                }
+
+                let deployTimeoutSec = 600 // 10 minutes
+                let waitResult = semaphore.wait(timeout: .now() + .seconds(deployTimeoutSec))
+                var didTimeout = false
+                if waitResult == .timedOut, process.isRunning {
+                    didTimeout = true
+                    process.terminate()
+                    _ = semaphore.wait(timeout: .now() + 5)
+                }
+
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil
                 stderrPipe.fileHandleForReading.readabilityHandler = nil
 
@@ -553,43 +843,42 @@ public actor ToolExecutor {
                 let combinedOutput = outputLines.joined(separator: "\n")
                 lock.unlock()
 
-                let exitCode = process.terminationStatus
-                let summary = exitCode == 0
-                    ? "Fastlane \(effectiveLane) completed successfully."
-                    : "Fastlane \(effectiveLane) failed with exit code \(exitCode)."
+                let exitCode = didTimeout ? Int32(-1) : process.terminationStatus
+                let summary: String
+                if didTimeout {
+                    summary = "Fastlane \(effectiveLane) timed out after \(deployTimeoutSec) seconds."
+                } else if exitCode == 0 {
+                    summary = "Fastlane \(effectiveLane) completed successfully."
+                } else {
+                    summary = "Fastlane \(effectiveLane) failed with exit code \(exitCode)."
+                }
                 let result = combinedOutput.isEmpty ? summary : "\(summary)\n\n\(combinedOutput)"
                 continuationResult.resume(returning: (result, exitCode != 0))
             }
         }
-    }
-
-    // MARK: - Sandboxing
-
-    private func resolvedURL(for path: String) -> URL {
-        if path.hasPrefix("/") {
-            return URL(fileURLWithPath: path)
+        } onCancel: {
+            processRef.terminate()
         }
-        return projectRoot.appendingPathComponent(path)
     }
 
-    private func sandboxCheck(_ url: URL) -> Bool {
-        if autonomyMode == .fullSend {
-            return true
-        }
-        let resolved = url.standardized.path
-        let root     = projectRoot.standardized.path
-        return resolved.hasPrefix(root)
-    }
+
 
     private func lineHeuristic(for text: String) -> Int {
         guard !text.isEmpty else { return 0 }
         return text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
     }
 
-    private func runResearcher(query: String) async throws -> (exitCode: Int32, stdout: String, stderr: String) {
-        try await withCheckedThrowingContinuation { continuation in
+    private func runResearcher(query: String) async throws -> (exitCode: Int32, stdout: String, stderr: String, outputDir: URL) {
+        let outputDir = FileManager.default.temporaryDirectory.appendingPathComponent("researcher-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+
+        let processRef = CancellableProcessRef()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async { [projectRoot] in
                 let process = Process()
+                processRef.set(process)
                 let stdoutPipe = Pipe()
                 let stderrPipe = Pipe()
 
@@ -598,7 +887,9 @@ public actor ToolExecutor {
                 process.currentDirectoryURL = projectRoot
                 process.standardOutput = stdoutPipe
                 process.standardError = stderrPipe
-                process.environment = ProcessInfo.processInfo.environment
+                var environment = ProcessInfo.processInfo.environment
+                environment["RESEARCHER_OUTPUT_DIR"] = outputDir.path
+                process.environment = environment
                 let semaphore = DispatchSemaphore(value: 0)
                 process.terminationHandler = { _ in
                     semaphore.signal()
@@ -620,19 +911,22 @@ public actor ToolExecutor {
                 let stdout = String(decoding: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
                 let stderr = String(decoding: stderrPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
                 let exitCode = waitResult == .timedOut ? -1 : process.terminationStatus
-                continuation.resume(returning: (exitCode, stdout, stderr))
+                continuation.resume(returning: (exitCode, stdout, stderr, outputDir))
             }
+        }
+        } onCancel: {
+            processRef.terminate()
         }
     }
 
-    private func readContextPack() -> String {
-        let path = NSString(string: "~/.darkfactory/context_pack.txt").expandingTildeInPath
-        return (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+    private func readContextPack(from directory: URL) -> String {
+        let url = directory.appendingPathComponent("context_pack.txt")
+        return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
     }
 
-    private func readContextPackResults() -> [ResearcherSearchResult] {
-        let path = NSString(string: "~/.darkfactory/context_pack_results.json").expandingTildeInPath
-        guard let data = FileManager.default.contents(atPath: path),
+    private func readContextPackResults(from directory: URL) -> [ResearcherSearchResult] {
+        let url = directory.appendingPathComponent("context_pack_results.json")
+        guard let data = FileManager.default.contents(atPath: url.path),
               let results = try? JSONDecoder().decode([ResearcherSearchResult].self, from: data) else {
             return []
         }
@@ -643,15 +937,22 @@ public actor ToolExecutor {
         name: String,
         input: [String: AnyCodableValue]
     ) async -> ToolExecutionOutcome {
+        let subagentPermissions = ToolPermissionPolicy()
+        if case .blocked(let reason) = subagentPermissions.check(name) {
+            return ToolExecutionOutcome(text: reason, isError: true)
+        }
+        guard let tool = ToolName(normalizing: name) else {
+            return ToolExecutionOutcome(text: "Sub-agent tool unavailable: \(name)", isError: true)
+        }
         do {
-            switch name {
-            case "file_read":
+            switch tool {
+            case .fileRead:
                 let raw = try await executeFileRead(input)
                 return ToolExecutionOutcome(text: raw.0, isError: raw.1)
-            case "list_files":
+            case .listFiles:
                 let raw = try await executeListFiles(input)
                 return ToolExecutionOutcome(text: raw.0, isError: raw.1)
-            case "web_search":
+            case .webSearch:
                 return try await executeWebSearch(input, emitProgress: false)
             default:
                 return ToolExecutionOutcome(text: "Sub-agent tool unavailable: \(name)", isError: true)
@@ -666,31 +967,6 @@ public actor ToolExecutor {
         return values.compactMap(\.stringValue)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-    }
-
-    private func explorerPrompt(objective: String, targetDirectories: [String]) -> String {
-        let scopedDirectories = targetDirectories.isEmpty
-            ? "- \(projectRoot.path)"
-            : targetDirectories.map { "- \($0)" }.joined(separator: "\n")
-
-        return """
-        Objective:
-        \(objective)
-
-        Target directories to inspect first:
-        \(scopedDirectories)
-        """
-    }
-
-    private func reviewerPrompt(filesToReview: [String], focusArea: String) -> String {
-        let files = filesToReview.map { "- \($0)" }.joined(separator: "\n")
-        return """
-        Focus area:
-        \(focusArea)
-
-        Files to review:
-        \(files)
-        """
     }
 
 }

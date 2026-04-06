@@ -1,0 +1,14 @@
+name = "Code Review Audit"
+description = "Deep dive review of recent changes looking for security and performance regressions."
+autonomy = "review"
+icon = "eye.trianglebadge.exclamationmark"
+tags = ["review", "security"]
+objective = """
+Review all modified files in the current worktree.
+Look specifically for:
+1. Retain cycles in Swift Concurrency
+2. Unhandled error states
+3. Hardcoded strings that should be localized
+4. Force unwraps or unsafe casts
+5. Missing access control on public API surfaces
+"""

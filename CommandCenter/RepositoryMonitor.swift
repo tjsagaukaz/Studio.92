@@ -71,14 +71,12 @@ final class RepositoryMonitor {
         refreshTask?.cancel()
         refreshTask = Task { [workspaceURL, gitService] in
             if !immediate {
-                try? await Task.sleep(nanoseconds: 350_000_000)
+                // 1.5s debounce — long enough that Xcode build bursts settle
+                // before we hit git, avoiding rapid isRefreshing flicker.
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
             }
 
             guard !Task.isCancelled else { return }
-
-            await MainActor.run {
-                self.isRefreshing = true
-            }
 
             let refreshedState = await gitService.repositoryState(for: workspaceURL)
             guard !Task.isCancelled else { return }
@@ -175,7 +173,15 @@ final class RepositoryMonitor {
             "/DerivedData/",
             "/build/",
             "/dist/",
-            "/node_modules/"
+            "/node_modules/",
+            // Xcode project internals — written constantly during development
+            ".xcodeproj/project.xcworkspace/xcuserdata/",
+            ".xcodeproj/xcuserdata/",
+            "/xcuserdata/",
+            ".xccheckout",
+            ".xcactivitylog",
+            "/Index.noindex/",
+            "/ModuleCache.noindex/"
         ]
 
         let shouldRefresh = paths.contains { rawPath in
@@ -204,12 +210,12 @@ final class RepositoryMonitor {
 
     private var currentPollInterval: Int {
         if NSApplication.shared.isActive {
-            return 15
-        }
-        if NSApplication.shared.isHidden {
             return 60
         }
-        return 30
+        if NSApplication.shared.isHidden {
+            return 120
+        }
+        return 90
     }
 
     private func installLifecycleObserversIfNeeded() {

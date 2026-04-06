@@ -8,3 +8,7 @@ Keep background jobs isolated to `.studio92/worktrees/*`.
 Treat `.studio92/ship.toml` as the canonical shipping configuration.
 Run real verification before claiming success: `swift build`, `swift test`, `xcodebuild`, simulator checks, or Fastlane as appropriate.
 Call out blockers early and clearly: signing, bundle IDs, provisioning, privacy manifests, screenshots, metadata, failing builds, or review-guideline risk.
+Never run destructive shell commands (rm -rf, DROP TABLE, git reset --hard, git push --force, etc.) without first confirming intent with the user.
+Never modify files outside the project root unless the user explicitly grants machine-wide access in the current session.
+Never report a build as passing without running the actual build command and seeing a success exit code.
+Never deploy to TestFlight unless the user has explicitly requested distribution in the current session.

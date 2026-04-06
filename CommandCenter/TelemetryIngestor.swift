@@ -218,7 +218,7 @@ final class TelemetryIngestor {
             project.displayGoal = packet.displayGoal ?? project.displayGoal ?? packet.goal
 
             // Create epoch
-            let epochIndex = project.epochs.count
+            let epochIndex = project.sortedEpochs.count
             let epoch = Epoch(
                 index: epochIndex,
                 summary: packet.payload.rationale,

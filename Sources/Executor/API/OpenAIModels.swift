@@ -7,7 +7,7 @@ import Foundation
 // MARK: - Model
 
 public enum OpenAIModel: String, Sendable {
-    case gpt45 = "gpt-4.5-preview"
+    case gpt54 = "gpt-5.4"
 }
 
 // MARK: - Request
@@ -20,7 +20,7 @@ public struct OpenAIRequest: Encodable, Sendable {
     public let response_format: ResponseFormat
 
     public init(
-        model:          String = OpenAIModel.gpt45.rawValue,
+        model:          String = OpenAIModel.gpt54.rawValue,
         messages:        [OpenAIMessage],
         maxTokens:       Int    = 4096,
         temperature:     Double = 0.1,
@@ -431,14 +431,13 @@ enum FixResponseGuardrails {
             resolvedURL = rootURL.appendingPathComponent(filePath)
         }
 
-        let standardizedURL = resolvedURL.standardizedFileURL
-        let resolvedParentURL = standardizedURL
-            .deletingLastPathComponent()
-            .resolvingSymlinksInPath()
-        let resolvedPath = resolvedParentURL
-            .appendingPathComponent(standardizedURL.lastPathComponent)
-            .standardizedFileURL
-            .path
+        // Resolve symlinks on the parent directory (which exists on disk)
+        // then re-append the filename. .resolvingSymlinksInPath() is a no-op
+        // for path components that don't exist yet, so resolving the full
+        // path would miss symlink escapes when the target file is new.
+        let standardized = resolvedURL.standardizedFileURL
+        let parent = standardized.deletingLastPathComponent().resolvingSymlinksInPath()
+        let resolvedPath = parent.appendingPathComponent(standardized.lastPathComponent).path
 
         guard resolvedPath == normalizedRoot || resolvedPath.hasPrefix(normalizedRoot + "/") else {
             throw ExecutorError.pathOutsideProjectRoot(path: filePath)

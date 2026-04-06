@@ -42,6 +42,16 @@ let package = Package(
             dependencies: ["Executor"],
             path: "Sources/ExecutorCLI"
         ),
+        .target(
+            name: "BuildDiagnostics",
+            path: "CommandCenter",
+            sources: ["BuildDiagnostics.swift"]
+        ),
+        .target(
+            name: "MultimodalEngine",
+            path: "CommandCenter",
+            sources: ["MultimodalEngine.swift"]
+        ),
         .testTarget(
             name: "AgentCouncilTests",
             dependencies: ["AgentCouncil"],
@@ -51,6 +61,16 @@ let package = Package(
             name: "ExecutorTests",
             dependencies: ["Executor"],
             path: "Tests/ExecutorTests"
+        ),
+        .testTarget(
+            name: "BuildDiagnosticsTests",
+            dependencies: ["BuildDiagnostics"],
+            path: "Tests/BuildDiagnosticsTests"
+        ),
+        .testTarget(
+            name: "MultimodalEngineTests",
+            dependencies: ["MultimodalEngine"],
+            path: "Tests/MultimodalEngineTests"
         )
     ]
 )

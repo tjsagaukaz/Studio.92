@@ -19,8 +19,8 @@ public actor SubAgentManager {
             userPrompt: String,
             model: ClaudeModel,
             tools: [ToolDefinition],
-            maxIterations: Int = 8,
-            maxTokens: Int = 3072
+            maxIterations: Int = 12,
+            maxTokens: Int = 8192
         ) {
             self.systemPrompt = systemPrompt
             self.userPrompt = userPrompt
@@ -32,18 +32,42 @@ public actor SubAgentManager {
     }
 
     private let client: ClaudeAPIClient
+    private let tracer: TraceCollector?
+    private let parentSpanID: UUID?
 
-    public init(client: ClaudeAPIClient) {
+    public init(client: ClaudeAPIClient, tracer: TraceCollector? = nil, parentSpanID: UUID? = nil) {
         self.client = client
+        self.tracer = tracer
+        self.parentSpanID = parentSpanID
+    }
+
+    /// Result from a sub-agent run, including the summary and iteration count.
+    public struct RunResult: Sendable {
+        public let summary: String
+        public let iterations: Int
     }
 
     public func run(
         spec: Spec,
         toolHandler: @escaping @Sendable (String, [String: AnyCodableValue]) async -> ToolExecutionOutcome
-    ) async throws -> String {
+    ) async throws -> RunResult {
+        let subagentSpanID = await tracer?.begin(
+            kind: .subagent,
+            name: "subagent_run",
+            parentID: parentSpanID,
+            attributes: ["model": spec.model.rawValue, "maxIterations": "\(spec.maxIterations)"]
+        )
+
         var messages: [ClaudeMessage] = [.user(spec.userPrompt)]
 
-        for _ in 0..<spec.maxIterations {
+        for iteration in 0..<spec.maxIterations {
+            let llmSpanID = await tracer?.begin(
+                kind: .llmCall,
+                name: "subagent_llm_call",
+                parentID: subagentSpanID,
+                attributes: ["iteration": "\(iteration)", "model": spec.model.rawValue]
+            )
+
             let response = try await client.complete(
                 system: spec.systemPrompt,
                 messages: messages,
@@ -57,6 +81,8 @@ public actor SubAgentManager {
             let summaryText = summarizedText(from: response.content)
             let toolUses = toolUses(from: response.content)
 
+            if let llmSpanID { await tracer?.end(llmSpanID) }
+
             if responseBlocks.isEmpty {
                 messages.append(.assistant(summaryText))
             } else {
@@ -64,34 +90,75 @@ public actor SubAgentManager {
             }
 
             guard !toolUses.isEmpty else {
-                return summaryText
+                if let subagentSpanID {
+                    await tracer?.setAttribute("iterations", value: "\(iteration + 1)", on: subagentSpanID)
+                    await tracer?.end(subagentSpanID)
+                }
+                return RunResult(summary: summaryText, iterations: iteration + 1)
             }
 
-            let toolResults: [MessageBlock] = await withTaskGroup(of: MessageBlock.self) { group in
-                for toolUse in toolUses {
-                    group.addTask {
-                        let outcome = await toolHandler(toolUse.name, toolUse.input)
-                        return .toolResult(
-                            ToolResultBlock(
-                                toolUseId: toolUse.id,
-                                content: outcome.toolResultContent,
-                                isError: outcome.isError
+            // Partition tool calls: reads run in parallel, writes run sequentially.
+            let partitioned = ToolParallelism.partition(
+                toolUses,
+                name: { $0.name },
+                inputJSON: { toolUse in
+                    guard let data = try? JSONEncoder().encode(toolUse.input),
+                          let json = String(data: data, encoding: .utf8) else { return "" }
+                    return json
+                }
+            )
+
+            var indexedResults: [Int: MessageBlock] = [:]
+
+            // Run parallel-safe tools concurrently.
+            if !partitioned.parallel.isEmpty {
+                let parallelResults = await withTaskGroup(of: (Int, MessageBlock).self) { group in
+                    for (originalIndex, toolUse) in partitioned.parallel {
+                        group.addTask {
+                            let outcome = await toolHandler(toolUse.name, toolUse.input)
+                            return (
+                                originalIndex,
+                                .toolResult(
+                                    ToolResultBlock(
+                                        toolUseId: toolUse.id,
+                                        content: outcome.toolResultContent,
+                                        isError: outcome.isError
+                                    )
+                                )
                             )
-                        )
+                        }
                     }
+                    var results: [Int: MessageBlock] = [:]
+                    for await (index, block) in group {
+                        results[index] = block
+                    }
+                    return results
                 }
-
-                var results: [MessageBlock] = []
-                for await block in group {
-                    results.append(block)
-                }
-                return results
+                indexedResults.merge(parallelResults) { _, new in new }
             }
+
+            // Run sequential tools (writes, path-conflicting reads) one at a time.
+            for (originalIndex, toolUse) in partitioned.sequential {
+                let outcome = await toolHandler(toolUse.name, toolUse.input)
+                indexedResults[originalIndex] = .toolResult(
+                    ToolResultBlock(
+                        toolUseId: toolUse.id,
+                        content: outcome.toolResultContent,
+                        isError: outcome.isError
+                    )
+                )
+            }
+
+            let toolResults: [MessageBlock] = toolUses.indices.compactMap { indexedResults[$0] }
 
             messages.append(.init(role: .user, content: .blocks(toolResults)))
         }
 
-        return "Sub-agent reached its iteration limit before producing a final summary."
+        if let subagentSpanID { await tracer?.end(subagentSpanID, error: "iteration_limit") }
+        return RunResult(
+            summary: "Sub-agent reached its iteration limit before producing a final summary.",
+            iterations: spec.maxIterations
+        )
     }
 
     private func toolUses(from blocks: [ContentBlock]) -> [ToolUseBlock] {

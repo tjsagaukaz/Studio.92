@@ -1,6 +1,6 @@
 // main.swift
 // Studio.92 — Executor CLI
-// GPT-4.5 powered build-repair tool.
+// GPT-5.4 powered build-repair tool.
 //
 // USAGE:
 //   swift run executor --errors compiler_errors.txt [--project-root <path>] [--max-retries 3] [--verbose]
@@ -17,7 +17,7 @@ struct ExecutorCLIMain {
         var projectRoot: String  = FileManager.default.currentDirectoryPath
         var maxRetries:  Int     = 3
         var verbose:     Bool    = false
-        var model:       String  = OpenAIModel.gpt45.rawValue
+        var model:       String  = OpenAIModel.gpt54.rawValue
 
         // Parse arguments
         var args = CommandLine.arguments.dropFirst().makeIterator()

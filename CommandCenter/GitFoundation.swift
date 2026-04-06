@@ -386,6 +386,58 @@ actor GitService {
         )
     }
 
+    // MARK: - Temporal Anchor (Revert Protocol)
+
+    /// Enum describing the result of a dirty-state check before a revert.
+    enum RevertResult: Sendable {
+        case clean
+        /// Uncommitted changes were stashed. The stash label is provided for display.
+        case stashedDirtyState(stashLabel: String)
+    }
+
+    /// Creates a lightweight Git ref anchor under `refs/studio92/anchors/<anchorID>`.
+    /// Points to current HEAD — invisible to `git log`, branch-safe, survives crashes.
+    /// Returns the HEAD commit SHA.
+    func createAnchor(id: UUID, workspaceURL: URL) async throws -> String {
+        let root = workspaceURL.standardizedFileURL
+
+        let headOutput = try await runGit(arguments: ["rev-parse", "HEAD"], in: root)
+        guard let sha = String(data: headOutput.stdout, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !sha.isEmpty else {
+            throw GitServiceError.invalidUTF8("HEAD sha")
+        }
+
+        let refName = "refs/studio92/anchors/\(id.uuidString)"
+        _ = try await runGit(arguments: ["update-ref", refName, sha], in: root)
+        return sha
+    }
+
+    /// Reverts workspace to the commit stored in an anchor SHA.
+    ///
+    /// Safety sequence (Dirty Revert protection):
+    ///   1. Stash any uncommitted edits under a timestamped salvage label.
+    ///   2. `git reset --hard <sha>` — execute the time jump.
+    ///   3. Return `.stashedDirtyState` if anything was saved, `.clean` otherwise.
+    func revertToAnchor(sha: String, workspaceURL: URL) async throws -> RevertResult {
+        let root = workspaceURL.standardizedFileURL
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let stashLabel = "studio92:pre-revert-salvage-\(timestamp)"
+
+        // Attempt salvage stash — fails gracefully if working tree is clean.
+        let stashOut = await runGitAllowingFailure(
+            arguments: ["stash", "push", "--include-untracked", "-m", stashLabel],
+            in: root
+        )
+        let stashMsg = String(data: stashOut.stdout, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let didStash = stashOut.exitCode == 0 && !stashMsg.hasPrefix("No local changes")
+
+        // Time jump.
+        _ = try await runGit(arguments: ["reset", "--hard", sha], in: root)
+
+        return didStash ? .stashedDirtyState(stashLabel: stashLabel) : .clean
+    }
+
     func reviewDiffContexts(for workspaceURL: URL) async throws -> [ReviewDiffContext] {
         let state = await repositoryState(for: workspaceURL)
         guard state.phase == .ready else { return [] }
@@ -677,10 +729,21 @@ actor GitService {
             throw GitServiceError.processLaunchFailed(error.localizedDescription)
         }
 
+        // Timeout watchdog: terminate if git hangs longer than 30 seconds.
+        let timeoutTask = Task {
+            try await Task.sleep(for: .seconds(30))
+            guard process.isRunning else { return }
+            process.terminate()
+            try? await Task.sleep(for: .seconds(2))
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
+
         let exitCode = await Task.detached(priority: .utility) {
             process.waitUntilExit()
             return process.terminationStatus
         }.value
+        timeoutTask.cancel()
+
         let stdout = try await stdoutTask.value
         let stderr = try await stderrTask.value
 
@@ -692,10 +755,17 @@ actor GitService {
         return CommandOutput(stdout: stdout, stderr: stderr, exitCode: exitCode)
     }
 
+    private static let maxOutputBytes = 10 * 1024 * 1024 // 10 MB
+
     private static func readAll(from handle: FileHandle) async throws -> Data {
         var bytes: [UInt8] = []
+        bytes.reserveCapacity(4096)
         for try await byte in handle.bytes {
             bytes.append(byte)
+            if bytes.count >= maxOutputBytes {
+                bytes.append(contentsOf: Array("\n[output truncated at 10 MB]".utf8))
+                break
+            }
         }
         return Data(bytes)
     }

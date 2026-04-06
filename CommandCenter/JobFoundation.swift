@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Observation
 
@@ -101,6 +102,84 @@ struct AgentSession: Identifiable, Codable, Equatable {
     }
 }
 
+extension Notification.Name {
+    static let backgroundJobPersistenceDidFail = Notification.Name("backgroundJobPersistenceDidFail")
+}
+
+enum BackgroundJobPersistenceNotificationKey {
+    static let sessionID = "sessionID"
+    static let repoRootPath = "repoRootPath"
+    static let branchName = "branchName"
+    static let message = "message"
+}
+
+enum BackgroundJobPersistenceNotifier {
+
+    static func persistenceDidFail(session: AgentSession, message: String) {
+        NotificationCenter.default.post(
+            name: .backgroundJobPersistenceDidFail,
+            object: nil,
+            userInfo: [
+                BackgroundJobPersistenceNotificationKey.sessionID: session.id,
+                BackgroundJobPersistenceNotificationKey.repoRootPath: session.repoRootPath,
+                BackgroundJobPersistenceNotificationKey.branchName: session.branchName,
+                BackgroundJobPersistenceNotificationKey.message: message
+            ]
+        )
+    }
+}
+
+private enum BackgroundJobPersistencePolicy {
+    static let maxAttempts = 3
+    static let cumulativeDeadlineSeconds: TimeInterval = 15
+
+    static func retryDelayNanoseconds(forAttempt attempt: Int) -> UInt64 {
+        let base: UInt64 = switch attempt {
+        case 1: 300_000_000
+        case 2: 900_000_000
+        default: 1_500_000_000
+        }
+        let jitter = UInt64.random(in: 0...(base / 4))
+        return base + jitter
+    }
+}
+
+private func describeJobFoundationError(_ error: Error) -> String {
+    let nsError = error as NSError
+    let description = nsError.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+    if description.isEmpty {
+        return "\(nsError.domain) (\(nsError.code))"
+    }
+    return "\(nsError.domain) (\(nsError.code)): \(description)"
+}
+
+private extension Error {
+    var isRetryableSessionPersistenceError: Bool {
+        let nsError = self as NSError
+
+        if nsError.domain == NSPOSIXErrorDomain {
+            switch nsError.code {
+            case Int(EAGAIN), Int(EBUSY), Int(EINTR), Int(EMFILE), Int(ENFILE), Int(ENOENT):
+                return true
+            default:
+                return false
+            }
+        }
+
+        if nsError.domain == NSCocoaErrorDomain {
+            let cocoaError = CocoaError.Code(rawValue: nsError.code)
+            switch cocoaError {
+            case .fileNoSuchFile, .fileReadUnknown, .fileWriteFileExists, .fileWriteUnknown:
+                return true
+            default:
+                return false
+            }
+        }
+
+        return false
+    }
+}
+
 actor SessionStore {
 
     static let shared = SessionStore()
@@ -131,11 +210,22 @@ actor SessionStore {
 
     func loadSessions(in repoRootURL: URL) -> [AgentSession] {
         let directory = sessionsDirectory(for: repoRootURL)
-        guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) else {
+        let urls: [URL]
+
+        do {
+            urls = try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+        } catch {
+            let nsError = error as NSError
+            if nsError.domain == NSCocoaErrorDomain,
+               CocoaError.Code(rawValue: nsError.code) == .fileReadNoSuchFile {
+                return []
+            }
+
+            print("[SessionStore] Failed to list sessions in \(directory.path): \(describeJobFoundationError(error))")
             return []
         }
 
@@ -145,8 +235,13 @@ actor SessionStore {
         return urls
             .filter { $0.pathExtension == "json" }
             .compactMap { url in
-                guard let data = try? Data(contentsOf: url) else { return nil }
-                return try? decoder.decode(AgentSession.self, from: data)
+                do {
+                    let data = try Data(contentsOf: url)
+                    return try decoder.decode(AgentSession.self, from: data)
+                } catch {
+                    print("[SessionStore] Failed to load session \(url.lastPathComponent): \(describeJobFoundationError(error))")
+                    return nil
+                }
             }
             .sorted { lhs, rhs in
                 if lhs.updatedAt != rhs.updatedAt {
@@ -164,18 +259,21 @@ final class JobMonitor {
     var workspaceURL: URL
     var sessions: [AgentSession] = []
     var isRefreshing = false
+    var persistenceFailureMessage: String?
 
     @ObservationIgnored private let sessionStore = SessionStore.shared
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var watcher: PathEventMonitor?
     @ObservationIgnored private var watcherPath: String?
+    @ObservationIgnored private var persistenceFailureObserver: NSObjectProtocol?
 
     init(workspaceURL: URL) {
         self.workspaceURL = workspaceURL.standardizedFileURL
     }
 
     func start() {
+        installPersistenceFailureObserverIfNeeded()
         configureWatcherIfNeeded()
         startPollingIfNeeded()
         refreshNow()
@@ -189,11 +287,13 @@ final class JobMonitor {
         watcher?.stop()
         watcher = nil
         watcherPath = nil
+        removePersistenceFailureObserver()
     }
 
     func updateWorkspace(_ newWorkspaceURL: URL) {
         workspaceURL = newWorkspaceURL.standardizedFileURL
         sessions = []
+        persistenceFailureMessage = nil
         configureWatcherIfNeeded()
         refreshNow()
     }
@@ -206,7 +306,11 @@ final class JobMonitor {
             }
 
             let repoRootURL = workspaceURL.standardizedFileURL
-            _ = try? await sessionStore.ensureSessionsDirectory(for: repoRootURL)
+            do {
+                _ = try await sessionStore.ensureSessionsDirectory(for: repoRootURL)
+            } catch {
+                print("[JobMonitor] Failed to ensure sessions directory at \(repoRootURL.path): \(describeJobFoundationError(error))")
+            }
             let sessions = await sessionStore.loadSessions(in: repoRootURL)
             guard !Task.isCancelled else { return }
 
@@ -229,7 +333,12 @@ final class JobMonitor {
             .appendingPathComponent("sessions", isDirectory: true)
             .standardizedFileURL
 
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            print("[JobMonitor] Failed to create sessions directory at \(directory.path): \(describeJobFoundationError(error))")
+            return
+        }
         let path = directory.path
 
         if watcher == nil || watcherPath != path {
@@ -250,7 +359,11 @@ final class JobMonitor {
     private func scheduleRefresh() {
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+            } catch {
+                return
+            }
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 self?.refreshNow()
@@ -263,13 +376,49 @@ final class JobMonitor {
 
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                do {
+                    try await Task.sleep(nanoseconds: 15_000_000_000)
+                } catch {
+                    break
+                }
                 guard !Task.isCancelled else { break }
                 await MainActor.run {
                     self?.refreshNow()
                 }
             }
         }
+    }
+
+    private func installPersistenceFailureObserverIfNeeded() {
+        guard persistenceFailureObserver == nil else { return }
+
+        persistenceFailureObserver = NotificationCenter.default.addObserver(
+            forName: .backgroundJobPersistenceDidFail,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self,
+                  let repoRootPath = notification.userInfo?[BackgroundJobPersistenceNotificationKey.repoRootPath] as? String,
+                  let message = notification.userInfo?[BackgroundJobPersistenceNotificationKey.message] as? String,
+                  !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return
+            }
+
+            let standardizedRepoRootPath = URL(fileURLWithPath: repoRootPath, isDirectory: true)
+                .standardizedFileURL
+                .path
+
+            Task { @MainActor in
+                guard standardizedRepoRootPath == self.workspaceURL.path else { return }
+                self.persistenceFailureMessage = message
+            }
+        }
+    }
+
+    private func removePersistenceFailureObserver() {
+        guard let persistenceFailureObserver else { return }
+        NotificationCenter.default.removeObserver(persistenceFailureObserver)
+        self.persistenceFailureObserver = nil
     }
 }
 
@@ -295,6 +444,8 @@ actor BackgroundJobRunner {
             targetDirectoryName: targetDirectoryName
         )
 
+        let subagentModel = StudioModelStrategy.descriptor(for: .subagent, packageRoot: workspaceURL.path)
+
         var session = AgentSession(
             id: UUID(),
             parentSessionID: nil,
@@ -305,8 +456,8 @@ actor BackgroundJobRunner {
             worktreePath: worktree.worktreeURL.path,
             branchName: worktree.branchName,
             taskPrompt: taskPrompt,
-            modelIdentifier: StudioModelStrategy.subagent.identifier,
-            modelDisplayName: StudioModelStrategy.subagent.displayName,
+            modelIdentifier: subagentModel.identifier,
+            modelDisplayName: subagentModel.displayName,
             status: .queued,
             progressSummary: "Queued in an isolated worktree.",
             latestMessage: nil,
@@ -328,7 +479,7 @@ actor BackgroundJobRunner {
         activeTasks[session.id] = task
 
         session.status = .preparing
-        session.progressSummary = "Worktree created. Starting GPT-5.4 mini."
+        session.progressSummary = "Worktree created. Starting \(subagentModel.displayName)."
         session.updatedAt = Date()
         _ = try await sessionStore.save(session)
         return session
@@ -341,10 +492,85 @@ actor BackgroundJobRunner {
         openAIKey: String?
     ) async {
         var session = session
+        defer {
+            activeTasks.removeValue(forKey: session.id)
+        }
 
-        func persist() async {
+        func persist(context: String) async -> Bool {
             session.updatedAt = Date()
-            _ = try? await sessionStore.save(session)
+
+            var lastError: Error?
+            let deadline = Date().addingTimeInterval(BackgroundJobPersistencePolicy.cumulativeDeadlineSeconds)
+
+            for attempt in 1...BackgroundJobPersistencePolicy.maxAttempts {
+                guard Date() < deadline else {
+                    print(
+                        "[BackgroundJobRunner] Persist cumulative deadline exceeded for session " +
+                        "\(session.id.uuidString) while \(context)."
+                    )
+                    break
+                }
+                do {
+                    _ = try await sessionStore.save(session)
+                    if attempt > 1 {
+                        print(
+                            "[BackgroundJobRunner] Persist recovered for session \(session.id.uuidString) " +
+                            "on attempt \(attempt) while \(context)."
+                        )
+                    }
+                    return true
+                } catch {
+                    lastError = error
+                    print(
+                        "[BackgroundJobRunner] Persist attempt \(attempt)/\(BackgroundJobPersistencePolicy.maxAttempts) " +
+                        "failed for session \(session.id.uuidString) on branch \(session.branchName) while \(context): " +
+                        "\(describeJobFoundationError(error))"
+                    )
+
+                    let shouldRetry = attempt < BackgroundJobPersistencePolicy.maxAttempts &&
+                        error.isRetryableSessionPersistenceError
+                    guard shouldRetry else { break }
+
+                    do {
+                        try await Task.sleep(
+                            nanoseconds: BackgroundJobPersistencePolicy.retryDelayNanoseconds(forAttempt: attempt)
+                        )
+                    } catch {
+                        print(
+                            "[BackgroundJobRunner] Persistence retry wait cancelled for session " +
+                            "\(session.id.uuidString) while \(context)."
+                        )
+                        break
+                    }
+                }
+            }
+
+            let userFacingErrorDetail = lastError
+                .map { ($0 as NSError).localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .flatMap { $0.isEmpty ? nil : $0 } ?? "Unknown disk error."
+            let failureMessage =
+                "Background job state couldn't be saved to disk. The run was stopped to avoid losing updates. " +
+                userFacingErrorDetail
+
+            session.status = .failed
+            session.progressSummary = "Background job stopped because session state could not be saved."
+            session.errorMessage = failureMessage
+            session.latestMessage = failureMessage
+
+            if let lastError {
+                print(
+                    "[BackgroundJobRunner] Persist failed permanently for session \(session.id.uuidString) " +
+                    "on branch \(session.branchName) while \(context): \(describeJobFoundationError(lastError))"
+                )
+            } else {
+                print(
+                    "[BackgroundJobRunner] Persist failed permanently for session \(session.id.uuidString) " +
+                    "on branch \(session.branchName) while \(context): unknown error"
+                )
+            }
+
+            BackgroundJobPersistenceNotifier.persistenceDidFail(session: session, message: failureMessage)
+            return false
         }
 
         func appendEvent(_ line: String) {
@@ -361,21 +587,22 @@ actor BackgroundJobRunner {
             session.status = .failed
             session.progressSummary = "Background job could not start."
             session.errorMessage = "OPENAI_API_KEY is required for background worktree jobs."
-            appendEvent("OpenAI access is required for GPT-5.4 mini worktree jobs.")
-            await persist()
+            appendEvent("OpenAI access is required for the configured worktree model.")
+            guard await persist(context: "saving startup failure") else { return }
             return
         }
+
+        let subagentModel = StudioModelStrategy.descriptor(for: .subagent, packageRoot: worktreeURL.path)
 
         session.status = .running
         session.progressSummary = "Background worker is editing inside the worktree."
         appendEvent("Started \(session.modelDisplayName) in \(session.worktreeDisplayName).")
-        await persist()
+        guard await persist(context: "saving running state") else { return }
 
         let client = AgenticClient(
             apiKey: anthropicAPIKey,
             projectRoot: worktreeURL,
             openAIKey: openAIKey,
-            autonomyMode: .fullSend,
             allowMachineWideAccess: false
         )
 
@@ -383,9 +610,10 @@ actor BackgroundJobRunner {
             system: Self.workerSystemPrompt(for: worktreeURL),
             userMessage: session.taskPrompt,
             initialMessages: [],
-            model: StudioModelStrategy.subagent,
-            outputEffort: StudioModelStrategy.subagent.defaultReasoningEffort,
-            tools: DefaultToolSchemas.backgroundWorker,
+            model: subagentModel,
+            outputEffort: subagentModel.defaultReasoningEffort,
+            verbosity: subagentModel.defaultVerbosity,
+            tools: DefaultToolSchemas.leanOperator,
             cacheControl: ["type": "ephemeral"],
             maxIterations: 20
         )
@@ -401,46 +629,77 @@ actor BackgroundJobRunner {
                 if !snippet.isEmpty {
                     session.progressSummary = "Worker is drafting the handoff summary."
                     appendEvent(snippet)
-                    await persist()
+                    if !(await persist(context: "saving streamed worker commentary")) {
+                        didFail = true
+                        break
+                    }
                 }
             case .toolCallStart(_, let name):
                 session.progressSummary = Self.progressSummary(forToolNamed: name)
                 appendEvent("Started \(name.replacingOccurrences(of: "_", with: " ")).")
-                await persist()
+                if !(await persist(context: "saving tool start event")) {
+                    didFail = true
+                    break
+                }
             case .toolCallCommand(_, let command):
                 appendEvent("$ \(command)")
-                await persist()
+                if !(await persist(context: "saving tool command")) {
+                    didFail = true
+                    break
+                }
             case .toolCallOutput(_, let line):
                 appendEvent(line)
-                await persist()
+                if !(await persist(context: "saving tool output")) {
+                    didFail = true
+                    break
+                }
             case .toolCallResult(_, let output, let isError):
                 appendEvent(output)
                 if isError {
                     session.progressSummary = "A tool reported an error."
                 }
-                await persist()
+                if !(await persist(context: "saving tool result")) {
+                    didFail = true
+                    break
+                }
             case .completed:
                 appendEvent("Worker finished. Preparing review context.")
                 session.progressSummary = "Building the review thread."
-                await persist()
+                if !(await persist(context: "saving completion state")) {
+                    didFail = true
+                    break
+                }
             case .error(let message):
                 didFail = true
                 session.status = .failed
                 session.progressSummary = "Background job failed."
                 session.errorMessage = message
                 appendEvent(message)
-                await persist()
+                guard await persist(context: "saving worker failure") else { return }
             case .thinkingDelta, .thinkingSignature, .toolCallInputDelta, .usage:
                 break
             }
         }
 
         if didFail {
-            activeTasks.removeValue(forKey: session.id)
             return
         }
 
-        let diffContexts = (try? await gitService.reviewDiffContexts(for: worktreeURL)) ?? []
+        let diffContexts: [ReviewDiffContext]
+        do {
+            diffContexts = try await gitService.reviewDiffContexts(for: worktreeURL)
+        } catch {
+            print(
+                "[BackgroundJobRunner] Failed to build review diff context for session \(session.id.uuidString) " +
+                "on branch \(session.branchName): \(describeJobFoundationError(error))"
+            )
+            session.status = .failed
+            session.progressSummary = "Background job finished, but review context could not be loaded."
+            session.errorMessage = "The background job finished, but Studio.92 couldn't load the worktree diff for review."
+            appendEvent("Failed to build review context: \((error as NSError).localizedDescription)")
+            guard await persist(context: "saving review context failure") else { return }
+            return
+        }
         let reviewMarkdown = await makeReviewMarkdown(
             worktreeURL: worktreeURL,
             files: diffContexts.map(\.path),
@@ -462,8 +721,7 @@ actor BackgroundJobRunner {
         if session.latestMessage == nil {
             session.latestMessage = session.progressSummary
         }
-        await persist()
-        activeTasks.removeValue(forKey: session.id)
+        _ = await persist(context: "saving review thread")
     }
 
     private func makeReviewMarkdown(
@@ -484,7 +742,6 @@ actor BackgroundJobRunner {
             apiKey: reviewerKey,
             projectRoot: worktreeURL,
             openAIKey: openAIKey,
-            autonomyMode: .review,
             allowMachineWideAccess: false
         )
 
@@ -504,6 +761,8 @@ actor BackgroundJobRunner {
         - Any ship blockers or follow-ups last
         """
 
+        let reviewModel = StudioModelStrategy.descriptor(for: .review, packageRoot: worktreeURL.path)
+
         let stream = await client.run(
             system: """
             You are Studio.92 Review Specialist operating inside an isolated git worktree.
@@ -512,8 +771,9 @@ actor BackgroundJobRunner {
             """,
             userMessage: prompt,
             initialMessages: [],
-            model: StudioModelStrategy.review,
-            outputEffort: StudioModelStrategy.review.defaultReasoningEffort,
+            model: reviewModel,
+            outputEffort: reviewModel.defaultReasoningEffort,
+            verbosity: reviewModel.defaultVerbosity,
             tools: DefaultToolSchemas.reviewerTools,
             cacheControl: ["type": "ephemeral"],
             maxIterations: 8

@@ -35,7 +35,7 @@ public actor OpenAIAPIClient {
     public func complete(
         systemPrompt: String,
         messages:      [OpenAIMessage],
-        model:         String = OpenAIModel.gpt45.rawValue,
+        model:         String = OpenAIModel.gpt54.rawValue,
         maxTokens:     Int    = 4096,
         temperature:   Double = 0.1
     ) async throws -> OpenAIResponse {
@@ -82,7 +82,7 @@ public actor OpenAIAPIClient {
         systemPrompt: String,
         messages: [OpenAIMessage],
         projectRoot: String,
-        model: String = OpenAIModel.gpt45.rawValue,
+        model: String = OpenAIModel.gpt54.rawValue,
         maxTokens: Int = 4096,
         temperature: Double = 0.1,
         maxAttempts: Int = 2,

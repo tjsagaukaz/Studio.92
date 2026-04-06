@@ -13,13 +13,11 @@ prefer_native_frameworks = true
 use_storyboards = false
 
 [models]
-plan = "claude-sonnet-4.6"
-review = "claude-sonnet-4.6"
+review = "claude-sonnet-4-6"
 full_send = "gpt-5.4"
 subagent = "gpt-5.4-mini"
-standards_research = "gpt-5.4-mini"
-release_compliance = "gpt-5.4"
-escalation = "claude-opus-4.6"
+escalation = "claude-opus-4-6"
+explorer = "claude-haiku-4-5"
 
 [research]
 apple_docs_first = true
@@ -47,6 +45,9 @@ require_support_url = true
 require_privacy_url = true
 require_export_compliance_review = true
 require_release_notes = true
+
+[execution]
+max_parallel_tools = 6
 
 [verification]
 commands = [

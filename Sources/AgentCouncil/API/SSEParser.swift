@@ -5,6 +5,33 @@
 
 import Foundation
 
+private final class UTF8StreamDecoder {
+
+    private var buffer = Data()
+
+    func append(_ byte: UInt8) -> String? {
+        buffer.append(byte)
+
+        guard let string = String(data: buffer, encoding: .utf8) else {
+            return nil
+        }
+
+        buffer.removeAll(keepingCapacity: true)
+        return string
+    }
+
+    func flush() -> String? {
+        guard !buffer.isEmpty else { return nil }
+        guard let string = String(data: buffer, encoding: .utf8) else {
+            buffer.removeAll(keepingCapacity: true)
+            return nil
+        }
+
+        buffer.removeAll(keepingCapacity: true)
+        return string
+    }
+}
+
 /// Parses a raw byte stream from URLSession into Anthropic StreamEvent values.
 /// The Anthropic SSE format uses `event:` and `data:` fields separated by blank lines.
 public struct SSEParser: Sendable {
@@ -17,51 +44,68 @@ public struct SSEParser: Sendable {
     ) -> AsyncThrowingStream<StreamEvent, Error> where S.Element == UInt8, S: Sendable {
         AsyncThrowingStream { continuation in
             let task = Task {
+                let decoder = UTF8StreamDecoder()
                 var lineBuffer = ""
                 var currentEvent = ""
                 var currentData  = ""
 
-                do {
-                    for try await byte in bytes {
-                        let char = Character(UnicodeScalar(byte))
+                func processLine(_ line: String) {
+                    if line.isEmpty {
+                        if !currentData.isEmpty,
+                           let event = Self.parse(eventType: currentEvent, data: currentData) {
+                            continuation.yield(event)
+                        }
+                        currentEvent = ""
+                        currentData = ""
+                        return
+                    }
 
-                        if char == "\n" {
+                    if line.hasPrefix("event:") {
+                        currentEvent = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
+                    } else if line.hasPrefix("data:") {
+                        let payload = String(line.dropFirst(5)).trimmingCharacters(in: .init(charactersIn: " "))
+                        if currentData.isEmpty {
+                            currentData = payload
+                        } else {
+                            currentData += "\n" + payload
+                        }
+                    }
+                }
+
+                func processDecodedText(_ text: String) {
+                    for scalar in text {
+                        switch scalar {
+                        case "\r":
+                            continue
+                        case "\n":
                             let line = lineBuffer
                             lineBuffer = ""
+                            processLine(line)
+                        default:
+                            lineBuffer.append(scalar)
+                        }
+                    }
+                }
 
-                            // Blank line = event boundary.
-                            if line.isEmpty {
-                                if !currentData.isEmpty {
-                                    if let event = Self.parse(eventType: currentEvent, data: currentData) {
-                                        continuation.yield(event)
-                                    }
-                                }
-                                currentEvent = ""
-                                currentData  = ""
-                                continue
-                            }
-
-                            if line.hasPrefix("event:") {
-                                currentEvent = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
-                            } else if line.hasPrefix("data:") {
-                                let payload = String(line.dropFirst(5)).trimmingCharacters(in: .init(charactersIn: " "))
-                                if currentData.isEmpty {
-                                    currentData = payload
-                                } else {
-                                    currentData += "\n" + payload
-                                }
-                            }
-                            // Ignore comments (lines starting with :) and other fields.
-                        } else {
-                            lineBuffer.append(char)
+                do {
+                    for try await byte in bytes {
+                        if let decoded = decoder.append(byte) {
+                            processDecodedText(decoded)
                         }
                     }
 
+                    if let trailing = decoder.flush() {
+                        processDecodedText(trailing)
+                    }
+
+                    if !lineBuffer.isEmpty {
+                        processLine(lineBuffer)
+                    }
+
                     // Flush any trailing event.
-                    if !currentData.isEmpty {
-                        if let event = Self.parse(eventType: currentEvent, data: currentData) {
-                            continuation.yield(event)
-                        }
+                    if !currentData.isEmpty,
+                       let event = Self.parse(eventType: currentEvent, data: currentData) {
+                        continuation.yield(event)
                     }
                     continuation.finish()
                 } catch {

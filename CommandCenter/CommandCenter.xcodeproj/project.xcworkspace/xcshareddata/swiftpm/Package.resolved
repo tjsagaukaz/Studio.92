@@ -1,0 +1,24 @@
+{
+  "originHash" : "ed9519a2b5158cc1bc3c02389878603aa7cf411082c08f654243654edd7dc506",
+  "pins" : [
+    {
+      "identity" : "swift-ai-sdk",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/teunlao/swift-ai-sdk.git",
+      "state" : {
+        "revision" : "89374cac1b61ba6c6ec4183366a6652fa706f1d9",
+        "version" : "0.17.6"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser",
+      "state" : {
+        "revision" : "626b5b7b2f45e1b0b1c6f4a309296d1d21d7311b",
+        "version" : "1.7.1"
+      }
+    }
+  ],
+  "version" : 3
+}

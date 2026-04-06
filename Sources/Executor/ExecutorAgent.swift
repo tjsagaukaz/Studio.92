@@ -5,6 +5,26 @@
 import CryptoKit
 import Foundation
 
+/// Thread-safe wrapper for a Process reference, used to tie process lifetime to Swift Task cancellation.
+private final class CancellableProcessRef: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+
+    func set(_ p: Process) {
+        lock.lock()
+        process = p
+        lock.unlock()
+    }
+
+    func terminate() {
+        lock.lock()
+        let p = process
+        lock.unlock()
+        guard let p, p.isRunning else { return }
+        p.terminate()
+    }
+}
+
 // MARK: - Config
 
 public struct ExecutorConfig: Sendable {
@@ -22,7 +42,7 @@ public struct ExecutorConfig: Sendable {
         maxFixesPerResponse: Int    = 20,
         projectRoot:        String,
         compilerErrorsPath: String? = nil,
-        model:              String  = OpenAIModel.gpt45.rawValue,
+        model:              String  = OpenAIModel.gpt54.rawValue,
         verbose:            Bool    = false,
         buildWorkspace:     String? = nil,
         buildScheme:        String? = nil
@@ -211,7 +231,7 @@ public actor ExecutorAgent {
             )
 
             // 7. Re-run build
-            let buildResult = runBuild()
+            let buildResult = await runBuild()
 
             if buildResult.succeeded {
                 log("Build succeeded on attempt \(attempt)")
@@ -433,43 +453,84 @@ public actor ExecutorAgent {
         let exitCode: Int32
     }
 
-    func runBuild() -> BuildResult {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    func runBuild() async -> BuildResult {
+        // Capture config values before leaving actor isolation to avoid
+        // closing over `self` inside the GCD closure.
+        let projectRoot = config.projectRoot
+        let buildWorkspace = config.buildWorkspace
+        let buildScheme = config.buildScheme
 
-        var args = ["xcodebuild", "build"]
+        let processRef = CancellableProcessRef()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let projectRootURL = URL(fileURLWithPath: projectRoot)
+                let fm = FileManager.default
 
-        if let workspace = config.buildWorkspace {
-            args += ["-workspace", workspace]
+                // Detect project type: SPM package, Xcode workspace, or Xcode project.
+                let hasPackageSwift = fm.fileExists(atPath: projectRootURL.appendingPathComponent("Package.swift").path)
+                let hasXcworkspace = (try? fm.contentsOfDirectory(atPath: projectRoot))?
+                    .contains(where: { $0.hasSuffix(".xcworkspace") }) ?? false
+                let hasXcodeproj = (try? fm.contentsOfDirectory(atPath: projectRoot))?
+                    .contains(where: { $0.hasSuffix(".xcodeproj") }) ?? false
+
+                let process = Process()
+                processRef.set(process)
+
+                if let workspace = buildWorkspace, let scheme = buildScheme {
+                    process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+                    process.arguments = ["xcodebuild", "build", "-workspace", workspace, "-scheme", scheme, "-quiet"]
+                } else if let scheme = buildScheme {
+                    process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+                    process.arguments = ["xcodebuild", "build", "-scheme", scheme, "-quiet"]
+                } else if hasPackageSwift && !hasXcworkspace && !hasXcodeproj {
+                    process.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
+                    process.arguments = ["build"]
+                } else {
+                    process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+                    process.arguments = ["xcodebuild", "build", "-quiet"]
+                }
+
+                process.currentDirectoryURL = projectRootURL
+
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = pipe
+
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(returning: BuildResult(succeeded: false, output: "Failed to launch build: \(error)", exitCode: -1))
+                    return
+                }
+
+                let semaphore = DispatchSemaphore(value: 0)
+                process.terminationHandler = { _ in
+                    semaphore.signal()
+                }
+
+                let buildTimeoutSec = 300
+                let waitResult = semaphore.wait(timeout: .now() + .seconds(buildTimeoutSec))
+                if waitResult == .timedOut, process.isRunning {
+                    process.terminate()
+                    _ = semaphore.wait(timeout: .now() + 5)
+                    continuation.resume(returning: BuildResult(succeeded: false, output: "Build timed out after \(buildTimeoutSec) seconds.", exitCode: -1))
+                    return
+                }
+
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: data, encoding: .utf8) ?? ""
+
+                continuation.resume(returning: BuildResult(
+                    succeeded: process.terminationStatus == 0,
+                    output: output,
+                    exitCode: process.terminationStatus
+                ))
+            }
         }
-        if let scheme = config.buildScheme {
-            args += ["-scheme", scheme]
+        } onCancel: {
+            processRef.terminate()
         }
-        args += ["-quiet"]
-
-        process.arguments = args
-        process.currentDirectoryURL = URL(fileURLWithPath: config.projectRoot)
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-
-        do {
-            try process.run()
-        } catch {
-            return BuildResult(succeeded: false, output: "Failed to launch xcodebuild: \(error)", exitCode: -1)
-        }
-
-        process.waitUntilExit()
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
-
-        return BuildResult(
-            succeeded: process.terminationStatus == 0,
-            output: output,
-            exitCode: process.terminationStatus
-        )
     }
 
     // MARK: - Logging

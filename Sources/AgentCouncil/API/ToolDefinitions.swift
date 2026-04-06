@@ -5,6 +5,45 @@
 
 import Foundation
 
+/// Canonical tool names used by the agentic orchestrator. Using this enum
+/// instead of raw strings provides compile-time safety and exhaustive
+/// switch coverage across dispatch, parallelism, and UI layers.
+public enum ToolName: String, Sendable, CaseIterable, Hashable {
+    case fileRead            = "file_read"
+    case fileWrite           = "file_write"
+    case filePatch           = "file_patch"
+    case listFiles           = "list_files"
+    case delegateToExplorer  = "delegate_to_explorer"
+    case delegateToReviewer  = "delegate_to_reviewer"
+    case terminal            = "terminal"
+    case webSearch           = "web_search"
+    case deployToTestFlight  = "deploy_to_testflight"
+
+    /// Resolve aliases produced by different LLM providers into canonical names.
+    public init?(normalizing raw: String) {
+        if let exact = ToolName(rawValue: raw) {
+            self = exact
+            return
+        }
+        switch raw {
+        case "read_file":                               self = .fileRead
+        case "create_file", "write_file":               self = .fileWrite
+        case "apply_patch":                             self = .filePatch
+        case "list_dir", "file_search",
+             "grep_search", "semantic_search":          self = .listFiles
+        case "fetch_webpage":                           self = .webSearch
+        case "run_in_terminal":                         self = .terminal
+        default:                                        return nil
+        }
+    }
+
+    /// Read-only, side-effect-free tools safe for concurrent execution.
+    public static let parallelizable: Set<ToolName> = [.fileRead, .listFiles, .webSearch]
+
+    /// Tools that operate on a file path (extractable from input JSON).
+    public static let filePathTools: Set<ToolName> = [.fileRead, .fileWrite, .filePatch]
+}
+
 public enum AgentTools {
 
     /// All tools available to the agentic orchestrator.
@@ -85,7 +124,7 @@ public enum AgentTools {
             ],
             required: []
         ),
-        strict: true
+        strict: false
     )
 
     public static let delegateToExplorer = ToolDefinition(
@@ -155,7 +194,7 @@ public enum AgentTools {
             ],
             required: ["command"]
         ),
-        strict: true,
+        strict: false,
         inputExamples: [
             [
                 "command": .string("swift test"),
@@ -192,6 +231,6 @@ public enum AgentTools {
             ],
             required: []
         ),
-        strict: true
+        strict: false
     )
 }

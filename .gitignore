@@ -16,3 +16,7 @@ DerivedData/
 
 .studio92/sessions/
 .studio92/worktrees/
+
+# Temp artifacts
+waveletNoiseTile.bin
+tmp_neural_core_scene.py

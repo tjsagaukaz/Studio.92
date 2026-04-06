@@ -1,0 +1,13 @@
+name = "Test Coverage Gap Analysis"
+description = "Find untested code paths and generate missing unit tests."
+autonomy = "fullSend"
+icon = "testtube.2"
+tags = ["testing", "build"]
+objective = """
+Analyze test coverage across this workspace:
+1. Identify public API surfaces with no corresponding test cases
+2. Find error paths and edge cases that lack coverage
+3. Generate missing unit tests for the highest-risk untested code
+4. Ensure async/await and concurrency paths are tested
+Focus on files modified in the last 5 commits first.
+"""

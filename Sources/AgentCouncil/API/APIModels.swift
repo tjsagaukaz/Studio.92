@@ -79,7 +79,7 @@ public struct ThinkingConfig: Encodable, Sendable {
     public init(adaptiveEffort: Effort = .medium, display: DisplayMode? = nil) {
         self.type         = "enabled"
         self.budgetTokens = adaptiveEffort.minimumBudgetTokens
-        self.effort       = nil
+        self.effort       = adaptiveEffort.rawValue
         self.display      = display?.rawValue
     }
 
@@ -221,7 +221,7 @@ public struct SchemaItems: Encodable, Sendable {
 public enum ClaudeModel: String, Sendable {
     case opus   = "claude-opus-4-6"
     case sonnet = "claude-sonnet-4-6"
-    case haiku  = "claude-3-5-haiku-20241022"
+    case haiku  = "claude-haiku-4-5"
 }
 
 // MARK: - Message
@@ -400,7 +400,7 @@ extension ClaudeMessage: Codable {
             content = .text(text)
         } else {
             let blocks = try container.decode([MessageBlockCodable].self, forKey: .content)
-            content = .blocks(blocks.map(\.block))
+            content = .blocks(blocks.compactMap(\.block))
         }
     }
 
@@ -411,14 +411,14 @@ extension ClaudeMessage: Codable {
         case .text(let text):
             try container.encode(text, forKey: .content)
         case .blocks(let blocks):
-            try container.encode(blocks.map(MessageBlockCodable.init), forKey: .content)
+            try container.encode(blocks.map { MessageBlockCodable($0) }, forKey: .content)
         }
     }
 }
 
 /// Internal helper for coding MessageBlock to/from JSON.
 private struct MessageBlockCodable: Codable {
-    let block: MessageBlock
+    let block: MessageBlock?
 
     init(_ block: MessageBlock) { self.block = block }
 
@@ -461,12 +461,16 @@ private struct MessageBlockCodable: Codable {
             let signature = try container.decodeIfPresent(String.self, forKey: .signature)
             block = .thinking(ThinkingBlock(thinking: thinking, signature: signature))
         default:
-            throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown block type: \(type)")
+            // Forward-compatible: unknown block types (e.g. redacted_thinking) are
+            // silently skipped rather than killing the entire message decode.
+            block = nil
+            return
         }
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        guard let block else { return }
         switch block {
         case .text(let text):
             try container.encode("text", forKey: .type)

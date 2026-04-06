@@ -12,16 +12,20 @@ struct ShimmerEffect: ViewModifier {
     let isActive: Bool
 
     @State private var phase: CGFloat = -1.2
+    @State private var animationTask: Task<Void, Never>?
+    @State private var isAnimating = false
 
     func body(content: Content) -> some View {
         content
             .overlay {
                 if isActive {
                     LinearGradient(
-                        colors: [
-                            .clear,
-                            .white.opacity(0.3),
-                            .clear
+                        stops: [
+                            .init(color: Color.clear, location: 0),
+                            .init(color: StudioColorTokens.ThermalGlow.cool.opacity(0.18), location: 0.3),
+                            .init(color: StudioColorTokens.ThermalGlow.neutral.opacity(0.14), location: 0.5),
+                            .init(color: StudioColorTokens.ThermalGlow.warm.opacity(0.18), location: 0.7),
+                            .init(color: Color.clear, location: 1)
                         ],
                         startPoint: UnitPoint(x: phase - 1.0, y: 0.5),
                         endPoint: UnitPoint(x: phase, y: 0.5)
@@ -38,20 +42,52 @@ struct ShimmerEffect: ViewModifier {
                 if active {
                     startAnimationIfNeeded()
                 } else {
-                    phase = -1.2
+                    stopAnimation()
                 }
+            }
+            .onDisappear {
+                stopAnimation()
             }
     }
 
     private func startAnimationIfNeeded() {
-        guard isActive else { return }
+        guard isActive, !isAnimating else { return }
+
+        animationTask?.cancel()
+        isAnimating = true
         phase = -1.2
-        DispatchQueue.main.async {
-            guard isActive else { return }
-            withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
-                phase = 2.2
+
+        animationTask = Task { @MainActor in
+            defer {
+                animationTask = nil
+                isAnimating = false
             }
+
+            while !Task.isCancelled {
+                phase = -1.2
+                await Task.yield()
+                guard !Task.isCancelled else { break }
+
+                withAnimation(StudioMotion.shimmer) {
+                    phase = 2.2
+                }
+
+                do {
+                    try await Task.sleep(for: .seconds(4.0))
+                } catch {
+                    break
+                }
+            }
+
+            phase = -1.2
         }
+    }
+
+    private func stopAnimation() {
+        animationTask?.cancel()
+        animationTask = nil
+        isAnimating = false
+        phase = -1.2
     }
 }
 
@@ -71,7 +107,7 @@ struct ProcessingGearsView: View {
                 size: .title2,
                 baseRotation: 0,
                 animatedRotation: isSpinning ? 360 : 0,
-                tint: StudioTheme.secondaryText.opacity(0.94),
+                tint: StudioTextColor.secondary.opacity(0.94),
                 shadowOpacity: 0.16
             )
             .zIndex(1)
@@ -80,12 +116,12 @@ struct ProcessingGearsView: View {
                 size: .title3,
                 baseRotation: 18,
                 animatedRotation: isSpinning ? -360 : 0,
-                tint: StudioTheme.tertiaryText.opacity(0.96),
+                tint: StudioTextColor.tertiary.opacity(0.96),
                 shadowOpacity: 0.12
             )
             .offset(x: -2, y: 8)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, StudioSpacing.xxs)
         .drawingGroup()
         .onAppear {
             guard !isSpinning else { return }
@@ -104,19 +140,14 @@ struct ProcessingGearsView: View {
             .font(size)
             .symbolRenderingMode(.hierarchical)
             .foregroundStyle(tint)
-            .padding(6)
+            .padding(StudioSpacing.md)
             .background(
                 Circle()
-                    .fill(StudioTheme.surfaceFill)
+                    .fill(StudioSurfaceElevated.level2)
             )
-            .overlay(
-                Circle()
-                    .stroke(StudioTheme.stroke, lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(shadowOpacity), radius: 6, y: 2)
             .rotationEffect(.degrees(baseRotation + animatedRotation))
             .animation(
-                .linear(duration: 3.0).repeatForever(autoreverses: false),
+                StudioMotion.rotation,
                 value: isSpinning
             )
     }
@@ -141,14 +172,14 @@ struct PhantomToolLogView: View {
     let toolCall: ToolCall
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: StudioSpacing.sm) {
             Image(systemName: iconName)
-                .font(.system(size: 11, weight: .semibold))
+                .font(StudioTypography.captionSemibold)
                 .symbolEffect(.pulse, options: .repeating, isActive: toolCall.status == .active)
             Text(toolCall.command)
                 .lineLimit(1)
         }
-        .font(.system(.caption, design: .monospaced))
+        .font(StudioTypography.dataCaption)
         .foregroundStyle(foregroundColor)
         .shimmer(isActive: toolCall.status == .active)
     }
@@ -169,13 +200,13 @@ struct PhantomToolLogView: View {
     private var foregroundColor: Color {
         switch toolCall.status {
         case .active:
-            return .secondary.opacity(0.96)
+            return StudioTextColor.secondary.opacity(0.96)
         case .completed:
-            return StudioTheme.tertiaryText
+            return StudioTextColor.tertiary
         case .failed, .warning:
-            return .secondary
+            return StudioTextColor.secondary
         case .pending:
-            return .secondary.opacity(0.72)
+            return StudioTextColor.secondary.opacity(0.72)
         }
     }
 }
@@ -192,29 +223,21 @@ struct BlueprintCardView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: StudioSpacing.md) {
             HStack {
-                Label(progressLabel, systemImage: "list.bullet.rectangle.portrait")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(StudioTheme.secondaryText)
+                Label(progressLabel, systemImage: "list.bullet.rectangle")
+                    .font(StudioTypography.captionSemibold)
+                    .foregroundStyle(StudioTextColor.secondary)
                 Spacer()
             }
 
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: StudioSpacing.md) {
                 ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
                     row(for: task, state: displayState(for: task, at: index))
                 }
             }
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(StudioTheme.surfaceFill)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(StudioTheme.stroke, lineWidth: 1)
-        )
+        .padding(.vertical, StudioSpacing.xxs)
     }
 
     private var progressLabel: String {
@@ -236,14 +259,14 @@ struct BlueprintCardView: View {
 
     @ViewBuilder
     private func row(for task: BlueprintTask, state: DisplayState) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: StudioSpacing.lg) {
             Image(systemName: iconName(for: state))
-                .font(.system(size: 13, weight: .semibold))
+                .font(StudioTypography.captionSemibold)
                 .foregroundStyle(iconColor(for: state))
                 .symbolEffect(.pulse, options: .repeating, isActive: state == .active)
 
             Text(task.title)
-                .font(.system(size: 13.5, weight: .medium))
+                .font(StudioTypography.footnoteMedium)
                 .foregroundStyle(textColor(for: state))
                 .fixedSize(horizontal: false, vertical: true)
                 .shimmer(isActive: state == .active)
@@ -255,7 +278,7 @@ struct BlueprintCardView: View {
     private func iconName(for state: DisplayState) -> String {
         switch state {
         case .completed:
-            return "checkmark.circle.fill"
+            return "checkmark.circle"
         case .active:
             return "circle.dashed"
         case .pending:
@@ -266,22 +289,22 @@ struct BlueprintCardView: View {
     private func iconColor(for state: DisplayState) -> Color {
         switch state {
         case .completed:
-            return StudioTheme.success
+            return StudioTextColor.tertiary
         case .active:
-            return StudioTheme.accent
+            return StudioTextColor.secondary
         case .pending:
-            return StudioTheme.tertiaryText
+            return StudioTextColor.tertiary
         }
     }
 
     private func textColor(for state: DisplayState) -> Color {
         switch state {
         case .completed:
-            return StudioTheme.primaryText
+            return StudioTextColor.primary
         case .active:
-            return StudioTheme.primaryText.opacity(0.96)
+            return StudioTextColor.primary.opacity(0.96)
         case .pending:
-            return StudioTheme.secondaryText
+            return StudioTextColor.secondary
         }
     }
 }
@@ -303,20 +326,20 @@ struct BlueprintCompactView: View {
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .center, spacing: StudioSpacing.lg) {
             Image(systemName: isPipelineRunning ? "list.bullet.clipboard" : "checklist")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(StudioTheme.secondaryText)
+                .font(StudioTypography.footnoteSemibold)
+                .foregroundStyle(StudioTextColor.secondary)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: StudioSpacing.xxs) {
                 Text("Plan")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(StudioTheme.secondaryText)
+                    .font(StudioTypography.footnoteSemibold)
+                    .foregroundStyle(StudioTextColor.secondary)
 
                 if let activeTaskTitle, !activeTaskTitle.isEmpty {
                     Text(activeTaskTitle)
-                        .font(.caption)
-                        .foregroundStyle(StudioTheme.secondaryText)
+                        .font(StudioTypography.footnote)
+                        .foregroundStyle(StudioTextColor.secondary)
                         .lineLimit(1)
                         .shimmer(isActive: isPipelineRunning)
                 }
@@ -325,10 +348,10 @@ struct BlueprintCompactView: View {
             Spacer(minLength: 0)
 
             Text("\(completedCount)/\(tasks.count)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(StudioTheme.tertiaryText)
+                .font(StudioTypography.monoDigits)
+                .foregroundStyle(StudioTextColor.tertiary)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, StudioSpacing.xxs)
     }
 }
 
@@ -337,20 +360,20 @@ struct WebToolCard: View {
     let toolCall: ToolCall
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: StudioSpacing.xl) {
             Image(systemName: iconName)
-                .font(.system(size: 16, weight: .semibold))
+                .font(StudioTypography.titleSmall)
                 .foregroundStyle(iconColor)
                 .symbolEffect(.pulse, options: .repeating, isActive: toolCall.status == .active)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: StudioSpacing.xs) {
                 Text(title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(StudioTheme.secondaryText)
+                    .font(StudioTypography.footnoteSemibold)
+                    .foregroundStyle(StudioTextColor.secondary)
 
                 Text(toolCall.command)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(StudioTheme.primaryText)
+                    .font(StudioTypography.bodyMedium)
+                    .foregroundStyle(StudioTextColor.primary)
                     .lineLimit(2)
                     .textSelection(.enabled)
             }
@@ -358,17 +381,13 @@ struct WebToolCard: View {
             Spacer(minLength: 12)
 
             Text(statusLabel)
-                .font(.caption.weight(.semibold))
+                .font(StudioTypography.footnoteSemibold)
                 .foregroundStyle(statusColor)
         }
-        .padding(14)
+        .padding(StudioSpacing.section)
         .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(StudioTheme.panelBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(borderColor, lineWidth: 1)
+            RoundedRectangle(cornerRadius: StudioRadius.xl, style: .continuous)
+                .fill(cardBackground)
         )
         .shimmer(isActive: toolCall.status == .active)
     }
@@ -421,13 +440,13 @@ struct WebToolCard: View {
     private var iconColor: Color {
         switch toolCall.status {
         case .completed:
-            return StudioTheme.success
+            return StudioStatusColor.success
         case .failed:
-            return StudioTheme.danger
+            return StudioStatusColor.danger
         case .active:
-            return StudioTheme.accent
+            return StudioAccentColor.primary
         case .pending, .warning:
-            return StudioTheme.secondaryText
+            return StudioTextColor.secondary
         }
     }
 
@@ -449,26 +468,26 @@ struct WebToolCard: View {
     private var statusColor: Color {
         switch toolCall.status {
         case .completed:
-            return StudioTheme.success
+            return StudioStatusColor.success
         case .failed:
-            return StudioTheme.danger
+            return StudioStatusColor.danger
         case .active:
-            return StudioTheme.accent
+            return StudioAccentColor.primary
         case .pending, .warning:
-            return StudioTheme.secondaryText
+            return StudioTextColor.secondary
         }
     }
 
-    private var borderColor: Color {
+    private var cardBackground: Color {
         switch toolCall.status {
         case .completed:
-            return StudioTheme.success.opacity(0.28)
+            return StudioStatusColor.success.opacity(0.06)
         case .failed:
-            return StudioTheme.danger.opacity(0.28)
+            return StudioStatusColor.danger.opacity(0.06)
         case .active:
-            return StudioTheme.accentStroke
+            return StudioSurfaceElevated.level2
         case .pending, .warning:
-            return StudioTheme.stroke
+            return StudioSurfaceElevated.level1
         }
     }
 }
@@ -487,6 +506,7 @@ struct ArtifactConsoleBlock: View {
     let toolCall: ToolCall
 
     @State private var isExpanded: Bool
+    @State private var hasCopied = false
 
     init(toolCall: ToolCall) {
         self.toolCall = toolCall
@@ -496,24 +516,25 @@ struct ArtifactConsoleBlock: View {
     var body: some View {
         VStack(spacing: 0) {
             Button {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                withAnimation(StudioMotion.standardSpring) {
                     isExpanded.toggle()
                 }
             } label: {
-                HStack(spacing: 10) {
+                HStack(spacing: StudioSpacing.lg) {
                     Image(systemName: headerIconName)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(StudioTypography.footnoteSemibold)
                         .foregroundStyle(headerAccentColor)
                         .symbolEffect(.pulse, options: .repeating, isActive: toolCall.status == .active)
 
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: StudioSpacing.xxsPlus) {
                         Text(toolStatusLabel)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(StudioTheme.secondaryText)
+                            .font(StudioTypography.captionSemibold)
+                            .tracking(0.3)
+                            .foregroundStyle(StudioTextColor.secondary)
 
                         Text(toolCall.command)
-                            .font(.system(size: 12.5, weight: .medium, design: .monospaced))
-                            .foregroundStyle(StudioTheme.primaryText.opacity(0.94))
+                            .font(StudioTypography.codeSemibold)
+                            .foregroundStyle(StudioTextColor.primary)
                             .lineLimit(1)
                     }
 
@@ -521,28 +542,25 @@ struct ArtifactConsoleBlock: View {
 
                     if !toolCall.liveOutput.isEmpty {
                         Text(outputCountLabel)
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(StudioTheme.secondaryText)
+                            .font(StudioTypography.monoDigitsSmall)
+                            .foregroundStyle(StudioTextColor.secondary)
                     }
 
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(StudioTheme.secondaryText)
+                        .font(StudioTypography.captionSemibold)
+                        .foregroundStyle(StudioTextColor.secondary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .padding(.horizontal, StudioSpacing.xxl)
+                .padding(.vertical, StudioSpacing.xl)
+                .contentShape(RoundedRectangle(cornerRadius: StudioRadius.xl, style: .continuous))
             }
             .buttonStyle(.plain)
 
             if isExpanded {
-                Divider()
-                    .overlay(StudioTheme.divider)
-
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 6) {
+                        LazyVStack(alignment: .leading, spacing: StudioSpacing.sm) {
                             if toolCall.liveOutput.isEmpty {
                                 ArtifactConsoleLine(
                                     prefix: "›",
@@ -561,10 +579,26 @@ struct ArtifactConsoleBlock: View {
                                 }
                             }
                         }
-                        .padding(14)
+                        .padding(StudioSpacing.section)
                     }
                     .frame(minHeight: 118, maxHeight: 240)
-                    .background(StudioTheme.terminalBackground)
+                    .background(StudioSurface.viewport)
+                    .overlay(alignment: .topTrailing) {
+                        if !toolCall.liveOutput.isEmpty {
+                            Button {
+                                copyToClipboard()
+                            } label: {
+                                Image(systemName: hasCopied ? "checkmark" : "doc.on.doc")
+                                    .font(StudioTypography.badge)
+                                    .foregroundStyle(hasCopied ? StudioStatusColor.success : StudioTextColor.tertiary)
+                                    .padding(StudioSpacing.sm)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(StudioSpacing.sm)
+                        }
+                    }
+                    .padding(.horizontal, StudioSpacing.lg)
+                    .padding(.bottom, StudioSpacing.lg)
                     .onAppear {
                         scrollToBottom(using: proxy, animated: false)
                     }
@@ -576,22 +610,28 @@ struct ArtifactConsoleBlock: View {
             }
         }
         .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(StudioTheme.liftedSurface.opacity(0.82))
+            RoundedRectangle(cornerRadius: StudioRadius.xl, style: .continuous)
+                .fill(consoleBackground)
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(borderColor, lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.18), radius: 14, y: 8)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .animation(.spring(response: 0.28, dampingFraction: 0.84), value: toolCall.status)
+        .clipShape(RoundedRectangle(cornerRadius: StudioRadius.xl, style: .continuous))
+        .animation(StudioMotion.standardSpring, value: toolCall.status)
         .onChange(of: toolCall.status) { _, newStatus in
             if newStatus == .active || newStatus == .failed {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                withAnimation(StudioMotion.standardSpring) {
                     isExpanded = true
                 }
             }
+        }
+    }
+
+    private func copyToClipboard() {
+        let text = toolCall.liveOutput.joined(separator: "\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        hasCopied = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            hasCopied = false
         }
     }
 
@@ -640,40 +680,40 @@ struct ArtifactConsoleBlock: View {
         "\(toolCall.liveOutput.count) lines"
     }
 
-    private var borderColor: Color {
+    private var consoleBackground: Color {
         switch toolCall.status {
         case .pending:
-            return StudioTheme.stroke
+            return StudioSurfaceElevated.level1
         case .active:
-            return StudioTheme.accentStroke
+            return StudioSurfaceElevated.level2
         case .completed:
-            return StudioTheme.success.opacity(0.34)
+            return StudioStatusColor.success.opacity(0.05)
         case .warning:
-            return StudioTheme.warning.opacity(0.34)
+            return StudioStatusColor.warning.opacity(0.05)
         case .failed:
-            return StudioTheme.danger.opacity(0.34)
+            return StudioStatusColor.danger.opacity(0.05)
         }
     }
 
     private var headerAccentColor: Color {
         switch toolCall.status {
         case .pending:
-            return StudioTheme.secondaryText
+            return StudioTextColor.secondary
         case .active:
-            return StudioTheme.accent
+            return StudioAccentColor.primary
         case .completed:
-            return StudioTheme.success
+            return StudioStatusColor.success
         case .warning:
-            return StudioTheme.warning
+            return StudioStatusColor.warning
         case .failed:
-            return StudioTheme.danger
+            return StudioStatusColor.danger
         }
     }
 
     private func scrollToBottom(using proxy: ScrollViewProxy, animated: Bool) {
         let anchor = toolCall.liveOutput.isEmpty ? -1 : toolCall.liveOutput.count - 1
         if animated {
-            withAnimation(.easeOut(duration: 0.18)) {
+            withAnimation(StudioMotion.softFade) {
                 proxy.scrollTo(anchor, anchor: .bottom)
             }
         } else {
@@ -717,14 +757,14 @@ private struct ArtifactConsoleLine: View {
     let tone: Tone
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: StudioSpacing.lg) {
             Text(prefix)
-                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                .font(StudioTypography.dataCaption)
                 .foregroundStyle(prefixColor)
                 .frame(width: 12, alignment: .center)
 
             Text(text.isEmpty ? " " : text)
-                .font(.system(.caption, design: .monospaced))
+                .font(StudioTypography.dataCaption)
                 .foregroundStyle(textColor)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
@@ -734,22 +774,22 @@ private struct ArtifactConsoleLine: View {
     private var prefixColor: Color {
         switch tone {
         case .neutral:
-            return StudioTheme.tertiaryText
+            return StudioTextColor.tertiary
         case .success:
-            return StudioTheme.success
+            return StudioStatusColor.success
         case .error:
-            return StudioTheme.danger
+            return StudioStatusColor.danger
         }
     }
 
     private var textColor: Color {
         switch tone {
         case .neutral:
-            return StudioTheme.primaryText.opacity(0.72)
+            return StudioTextColor.primary.opacity(0.72)
         case .success:
-            return StudioTheme.success.opacity(0.96)
+            return StudioStatusColor.success.opacity(0.96)
         case .error:
-            return StudioTheme.danger.opacity(0.96)
+            return StudioStatusColor.danger.opacity(0.96)
         }
     }
 }

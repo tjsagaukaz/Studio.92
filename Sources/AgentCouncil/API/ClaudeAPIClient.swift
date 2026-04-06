@@ -21,10 +21,14 @@ public actor ClaudeAPIClient {
 
     /// Anthropic API version header value.
     private static let apiVersion = "2023-06-01"
+    private static let transientStatusCodes: Set<Int> = [429, 500, 502, 503, 504]
+    private static let maxRetryAttempts = 3
+    private static let maxRetryDelay: TimeInterval = 12
     /// Endpoint path for the Messages API.
     private static let messagesPath = "/v1/messages"
     /// Endpoint path for the token counting API.
     private static let countTokensPath = "/v1/messages/count_tokens"
+    private static let anthropicBaseURL = URL(string: "https://api.anthropic.com")!
     private static func makeDefaultSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 300
@@ -33,10 +37,10 @@ public actor ClaudeAPIClient {
         return URLSession(configuration: configuration)
     }
 
-    public init(apiKey: String, session: URLSession? = nil) throws {
+    public init(apiKey: String, baseURL: URL? = nil, session: URLSession? = nil) throws {
         guard !apiKey.isEmpty else { throw OrchestratorError.missingAPIKey }
         self.apiKey  = apiKey
-        self.baseURL = URL(string: "https://api.anthropic.com")!
+        self.baseURL = baseURL ?? Self.anthropicBaseURL
         self.session = session ?? Self.makeDefaultSession()
     }
 
@@ -110,14 +114,7 @@ public actor ClaudeAPIClient {
         }
         urlRequest.httpBody = try JSONEncoder().encode(request)
 
-        let (data, response) = try await session.data(for: urlRequest)
-        guard let http = response as? HTTPURLResponse else {
-            throw OrchestratorError.apiCallFailed(statusCode: -1, body: "No HTTP response")
-        }
-        guard http.statusCode == 200 else {
-            let body = String(decoding: data, as: UTF8.self)
-            throw OrchestratorError.apiCallFailed(statusCode: http.statusCode, body: body)
-        }
+        let data = try await performDataRequest(urlRequest)
 
         return try JSONDecoder().decode(ClaudeTokenCountResponse.self, from: data)
     }
@@ -170,19 +167,10 @@ public actor ClaudeAPIClient {
                     let encoder = JSONEncoder()
                     urlRequest.httpBody = try encoder.encode(request)
 
-                    let (bytes, response) = try await session.bytes(for: urlRequest)
-
-                    guard let http = response as? HTTPURLResponse else {
-                        throw OrchestratorError.apiCallFailed(statusCode: -1, body: "No HTTP response")
-                    }
-
-                    guard http.statusCode == 200 else {
-                        // Read the full error body from the byte stream.
-                        var errorData = Data()
-                        for try await byte in bytes { errorData.append(byte) }
-                        let body = String(decoding: errorData, as: UTF8.self)
-                        throw OrchestratorError.apiCallFailed(statusCode: http.statusCode, body: body)
-                    }
+                    let bytes = try await Self.performStreamingRequest(
+                        urlRequest,
+                        session: session
+                    )
 
                     let parser = SSEParser()
                     for try await event in parser.events(from: bytes) {
@@ -217,25 +205,110 @@ public actor ClaudeAPIClient {
         let encoder = JSONEncoder()
         urlRequest.httpBody = try encoder.encode(request)
 
-        let (data, response) = try await session.data(for: urlRequest)
-
-        guard let http = response as? HTTPURLResponse else {
-            throw OrchestratorError.apiCallFailed(statusCode: -1, body: "No HTTP response")
-        }
-
-        guard http.statusCode == 200 else {
-            let body = String(decoding: data, as: UTF8.self)
-            throw OrchestratorError.apiCallFailed(statusCode: http.statusCode, body: body)
-        }
+        let data = try await performDataRequest(urlRequest)
 
         let decoder = JSONDecoder()
         return try decoder.decode(ClaudeResponse.self, from: data)
     }
 
+    private func performDataRequest(_ request: URLRequest) async throws -> Data {
+        var lastRetryableError: OrchestratorError?
+
+        for attempt in 1...Self.maxRetryAttempts {
+            let (data, response) = try await session.data(for: request)
+
+            guard let http = response as? HTTPURLResponse else {
+                throw OrchestratorError.apiCallFailed(statusCode: -1, body: "No HTTP response")
+            }
+
+            guard http.statusCode == 200 else {
+                let body = String(decoding: data, as: UTF8.self)
+                let error = OrchestratorError.apiCallFailed(statusCode: http.statusCode, body: body)
+                guard Self.shouldRetry(statusCode: http.statusCode, attempt: attempt) else {
+                    throw error
+                }
+                lastRetryableError = error
+                try await Task.sleep(nanoseconds: UInt64(Self.retryDelay(attempt: attempt, response: http) * 1_000_000_000))
+                continue
+            }
+
+            return data
+        }
+
+        if let lastRetryableError {
+            throw lastRetryableError
+        }
+        throw OrchestratorError.maxRetriesExceeded(attempts: Self.maxRetryAttempts)
+    }
+
+    private static func performStreamingRequest(
+        _ request: URLRequest,
+        session: URLSession
+    ) async throws -> URLSession.AsyncBytes {
+        var lastRetryableError: OrchestratorError?
+
+        for attempt in 1...maxRetryAttempts {
+            let (bytes, response) = try await session.bytes(for: request)
+
+            guard let http = response as? HTTPURLResponse else {
+                throw OrchestratorError.apiCallFailed(statusCode: -1, body: "No HTTP response")
+            }
+
+            guard http.statusCode == 200 else {
+                var errorData = Data()
+                for try await byte in bytes {
+                    errorData.append(byte)
+                }
+                let body = String(decoding: errorData, as: UTF8.self)
+                let error = OrchestratorError.apiCallFailed(statusCode: http.statusCode, body: body)
+                guard shouldRetry(statusCode: http.statusCode, attempt: attempt) else {
+                    throw error
+                }
+                lastRetryableError = error
+                try await Task.sleep(nanoseconds: UInt64(retryDelay(attempt: attempt, response: http) * 1_000_000_000))
+                continue
+            }
+
+            return bytes
+        }
+
+        if let lastRetryableError {
+            throw lastRetryableError
+        }
+        throw OrchestratorError.maxRetriesExceeded(attempts: maxRetryAttempts)
+    }
+
+    private static func shouldRetry(statusCode: Int, attempt: Int) -> Bool {
+        transientStatusCodes.contains(statusCode) && attempt < maxRetryAttempts
+    }
+
+    private static func retryDelay(attempt: Int, response: HTTPURLResponse) -> TimeInterval {
+        if let retryAfter = response.value(forHTTPHeaderField: "Retry-After") {
+            if let seconds = Double(retryAfter) {
+                return min(max(seconds, 0.5), maxRetryDelay)
+            }
+
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
+
+            if let date = formatter.date(from: retryAfter) {
+                return min(max(date.timeIntervalSinceNow, 0.5), maxRetryDelay)
+            }
+        }
+
+        let fallback = pow(2, Double(max(0, attempt - 1)))
+        return min(max(fallback, 0.5), maxRetryDelay)
+    }
+
     private static func anthropicBetaHeader(for model: String, thinking: ThinkingConfig?) -> String? {
-        _ = model
-        _ = thinking
-        return nil
+        guard thinking != nil else { return nil }
+
+        let normalizedModel = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalizedModel.hasPrefix("claude-") else { return nil }
+
+        return "interleaved-thinking-2025-05-14"
     }
 
     /// Legacy diagnostic-only estimate kept for CLI/debug surfaces.

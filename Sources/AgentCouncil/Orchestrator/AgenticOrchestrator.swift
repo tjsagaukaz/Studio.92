@@ -30,6 +30,8 @@ public struct AgenticConfig: Sendable {
     public let cacheControl:  CacheControl?
     /// Maximum agentic loop iterations (tool-use round-trips). Safety valve.
     public let maxIterations: Int
+    /// Maximum number of tool calls to run concurrently within a single batch.
+    public let maxParallelTools: Int
 
     public static let `default` = AgenticConfig(
         model:         .sonnet,
@@ -38,7 +40,8 @@ public struct AgenticConfig: Sendable {
         tools:         AgentTools.all,
         thinking:      nil,
         cacheControl:  CacheControl(),
-        maxIterations: 25
+        maxIterations: 25,
+        maxParallelTools: 6
     )
 
     public init(
@@ -48,7 +51,8 @@ public struct AgenticConfig: Sendable {
         tools:         [ToolDefinition]  = AgentTools.all,
         thinking:      ThinkingConfig?   = nil,
         cacheControl:  CacheControl?     = CacheControl(),
-        maxIterations: Int               = 25
+        maxIterations: Int               = 25,
+        maxParallelTools: Int            = 6
     ) {
         self.model         = model
         self.maxTokens     = maxTokens
@@ -57,6 +61,7 @@ public struct AgenticConfig: Sendable {
         self.thinking      = thinking
         self.cacheControl  = cacheControl
         self.maxIterations = maxIterations
+        self.maxParallelTools = maxParallelTools
     }
 }
 
@@ -67,15 +72,18 @@ public actor AgenticOrchestrator {
     private let client:       ClaudeAPIClient
     private let toolExecutor: ToolExecutor
     private let config:       AgenticConfig
+    private let tracer:       TraceCollector?
 
     public init(
         client:       ClaudeAPIClient,
         toolExecutor: ToolExecutor,
-        config:       AgenticConfig = .default
+        config:       AgenticConfig = .default,
+        tracer:       TraceCollector? = nil
     ) {
         self.client       = client
         self.toolExecutor = toolExecutor
         self.config       = config
+        self.tracer       = tracer
     }
 
     /// Run the agentic loop for a conversation.
@@ -91,9 +99,15 @@ public actor AgenticOrchestrator {
     ) -> AsyncStream<AgentEvent> {
         let (stream, continuation) = AsyncStream<AgentEvent>.makeStream()
 
-        let task = Task { [client, toolExecutor, config] in
+        let task = Task { [client, toolExecutor, config, tracer] in
             var conversationMessages = messages
             var iteration = 0
+
+            let sessionSpanID = await tracer?.begin(
+                kind: .session,
+                name: "agentic_loop",
+                attributes: ["model": config.model.rawValue, "maxIterations": "\(config.maxIterations)"]
+            )
 
             do {
                 while iteration < config.maxIterations {
@@ -103,6 +117,14 @@ public actor AgenticOrchestrator {
                     var assistantText     = ""
                     var assistantBlocksByIndex: [Int: AssistantBlockAccumulator] = [:]
                     var stopReason: String?
+
+                    // Trace the LLM call.
+                    let llmSpanID = await tracer?.begin(
+                        kind: .llmCall,
+                        name: "claude_stream",
+                        parentID: sessionSpanID,
+                        attributes: ["iteration": "\(iteration)", "model": config.model.rawValue]
+                    )
 
                     // Stream one model turn.
                     let events = await client.stream(
@@ -163,6 +185,10 @@ public actor AgenticOrchestrator {
                         case .messageDelta(let delta):
                             stopReason = delta.stopReason
                             if let usage = delta.usage {
+                                if let llmSpanID {
+                                    await tracer?.setAttribute("inputTokens", value: "\(usage.inputTokens)", on: llmSpanID)
+                                    await tracer?.setAttribute("outputTokens", value: "\(usage.outputTokens)", on: llmSpanID)
+                                }
                                 continuation.yield(.usage(inputTokens: usage.inputTokens, outputTokens: usage.outputTokens))
                             }
 
@@ -173,11 +199,15 @@ public actor AgenticOrchestrator {
                             break
 
                         case .error(let err):
+                            if let llmSpanID { await tracer?.end(llmSpanID, error: err.message) }
                             continuation.yield(.error("Stream error: \(err.message)"))
                             continuation.finish()
                             return
                         }
                     }
+
+                    // LLM call completed.
+                    if let llmSpanID { await tracer?.end(llmSpanID) }
 
                     if Task.isCancelled { break }
 
@@ -198,38 +228,128 @@ public actor AgenticOrchestrator {
 
                     // If the model finished without requesting tools, we're done.
                     if pendingToolCalls.isEmpty || stopReason == "end_turn" {
+                        if let sessionSpanID {
+                            await tracer?.setAttribute("iterations", value: "\(iteration)", on: sessionSpanID)
+                            await tracer?.end(sessionSpanID)
+                        }
                         continuation.yield(.completed(stopReason: stopReason ?? "end_turn"))
                         continuation.finish()
                         return
                     }
 
-                    // Execute each tool call and send results back.
-                    var toolResultBlocks: [MessageBlock] = []
-                    for tc in pendingToolCalls {
+                    // Execute tool calls — parallel where safe, sequential otherwise.
+                    let partitioned = ToolParallelism.partition(
+                        pendingToolCalls,
+                        name: { $0.name },
+                        inputJSON: { $0.inputJSON }
+                    )
+                    var toolResultBlocks = Array<MessageBlock?>(repeating: nil, count: pendingToolCalls.count)
+
+                    // --- Parallel batch (bounded concurrency) ---
+                    if !partitioned.parallel.isEmpty {
+                        let cap = config.maxParallelTools
+                        let iterationSnapshot = iteration
+                        let runTool: @Sendable (Int, PendingToolCall) async -> (Int, MessageBlock) = { idx, tc in
+                            if Task.isCancelled {
+                                return (idx, .toolResult(ToolResultBlock(
+                                    toolUseId: tc.id,
+                                    content: .text("Tool cancelled"),
+                                    isError: true
+                                )))
+                            }
+                            let toolSpanID = await tracer?.begin(
+                                kind: .toolExecution,
+                                name: tc.name,
+                                parentID: sessionSpanID,
+                                attributes: ["toolCallID": tc.id, "iteration": "\(iterationSnapshot)", "parallel": "true"]
+                            )
+                            let parsedInput = Self.parseToolInput(tc.inputJSON)
+                            let outcome = await toolExecutor.execute(
+                                toolCallID: tc.id,
+                                name:       tc.name,
+                                input:      parsedInput
+                            )
+                            if let toolSpanID {
+                                await tracer?.setAttribute("isError", value: "\(outcome.isError)", on: toolSpanID)
+                                if outcome.isError {
+                                    await tracer?.end(toolSpanID, error: outcome.displayText)
+                                } else {
+                                    await tracer?.end(toolSpanID)
+                                }
+                            }
+                            continuation.yield(.toolCallResult(id: tc.id, output: outcome.displayText, isError: outcome.isError))
+                            return (idx, .toolResult(ToolResultBlock(
+                                toolUseId: tc.id,
+                                content:   outcome.toolResultContent,
+                                isError:   outcome.isError
+                            )))
+                        }
+                        await withTaskGroup(of: (Int, MessageBlock).self) { group in
+                            var iter = partitioned.parallel.makeIterator()
+                            for _ in 0..<min(cap, partitioned.parallel.count) {
+                                guard let (idx, tc) = iter.next() else { break }
+                                group.addTask { await runTool(idx, tc) }
+                            }
+                            for await (idx, block) in group {
+                                toolResultBlocks[idx] = block
+                                if let (nextIdx, nextTc) = iter.next() {
+                                    group.addTask { await runTool(nextIdx, nextTc) }
+                                }
+                            }
+                        }
+                    }
+
+                    // --- Sequential batch ---
+                    for (idx, tc) in partitioned.sequential {
+                        if Task.isCancelled {
+                            toolResultBlocks[idx] = .toolResult(ToolResultBlock(
+                                toolUseId: tc.id,
+                                content: .text("Tool cancelled"),
+                                isError: true
+                            ))
+                            continue
+                        }
+                        let toolSpanID = await tracer?.begin(
+                            kind: .toolExecution,
+                            name: tc.name,
+                            parentID: sessionSpanID,
+                            attributes: ["toolCallID": tc.id, "iteration": "\(iteration)"]
+                        )
                         let parsedInput = Self.parseToolInput(tc.inputJSON)
                         let outcome = await toolExecutor.execute(
                             toolCallID: tc.id,
                             name:       tc.name,
                             input:      parsedInput
                         )
+                        if let toolSpanID {
+                            await tracer?.setAttribute("isError", value: "\(outcome.isError)", on: toolSpanID)
+                            if outcome.isError {
+                                await tracer?.end(toolSpanID, error: outcome.displayText)
+                            } else {
+                                await tracer?.end(toolSpanID)
+                            }
+                        }
                         continuation.yield(.toolCallResult(id: tc.id, output: outcome.displayText, isError: outcome.isError))
-                        toolResultBlocks.append(.toolResult(ToolResultBlock(
+                        toolResultBlocks[idx] = .toolResult(ToolResultBlock(
                             toolUseId: tc.id,
                             content:   outcome.toolResultContent,
                             isError:   outcome.isError
-                        )))
+                        ))
                     }
+
                     conversationMessages.append(ClaudeMessage(
                         role: .user,
-                        content: .blocks(toolResultBlocks)
+                        content: .blocks(toolResultBlocks.compactMap { $0 })
                     ))
                 }
 
                 // Hit iteration cap.
+                if let sessionSpanID { await tracer?.end(sessionSpanID, error: "iteration_cap") }
                 continuation.yield(.error("Reached maximum agentic iterations (\(config.maxIterations))."))
                 continuation.finish()
 
             } catch {
+                if let sessionSpanID { await tracer?.end(sessionSpanID, error: error.localizedDescription) }
                 continuation.yield(.error("Agentic loop error: \(error.localizedDescription)"))
                 continuation.finish()
             }
@@ -244,7 +364,7 @@ public actor AgenticOrchestrator {
 
     // MARK: - Helpers
 
-    private struct PendingToolCall {
+    private struct PendingToolCall: Sendable {
         let id:       String
         let name:     String
         var inputJSON: String

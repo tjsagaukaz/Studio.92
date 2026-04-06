@@ -1,0 +1,14 @@
+name = "Performance Profiling"
+description = "Identify performance bottlenecks, excessive allocations, and main-thread blocking."
+autonomy = "plan"
+icon = "gauge.with.dots.needle.67percent"
+tags = ["performance"]
+objective = """
+Profile this codebase for performance issues. Investigate:
+1. Main-thread blocking calls (synchronous I/O, heavy computation)
+2. Excessive object allocations in hot paths
+3. Missing pagination or unbounded collection growth
+4. SwiftUI view body recomputation triggers
+5. Network waterfall patterns that could be parallelized
+Provide specific file paths, line numbers, and recommended fixes.
+"""
