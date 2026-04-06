@@ -1198,6 +1198,10 @@ final class StreamPipelineCoordinator {
     @ObservationIgnored private var accumulatedNarrative = ""
     @ObservationIgnored private var planDetected = false
     @ObservationIgnored private var chunkFlushTask: Task<Void, Never>?
+    /// When true, the deterministic plan from TaskPlanBridge is already driving the
+    /// InlineTaskPlanMonitor. Narrative-detected plans still render in the viewport
+    /// but do NOT overwrite the monitor.
+    @ObservationIgnored var hasDeterministicPlan = false
 
     /// Called on the main actor immediately after a plan is first detected.
     /// Set by PipelineSupport to convert the streaming message to a viewport card.
@@ -1303,6 +1307,7 @@ final class StreamPipelineCoordinator {
         activeToolSpans = [:]
         accumulatedNarrative = ""
         planDetected = false
+        hasDeterministicPlan = false
         didDetectPlan = false
         onPlanDetected = nil
         activePlanStepID = nil
@@ -1533,11 +1538,14 @@ final class StreamPipelineCoordinator {
         viewportModel?.showPlanDocument(viewportPlan)
         // Auto-open the viewport if it is currently hidden.
         viewportModel?.onRequestReveal?()
-        // Drive inline task plan strip in the chat column.
-        if taskPlanMonitor.isRevealed {
-            taskPlanMonitor.refresh(plan)
-        } else {
-            taskPlanMonitor.setPlan(plan)
+        // Drive inline task plan strip in the chat column — but only when no
+        // deterministic plan is already driving the monitor.
+        if !hasDeterministicPlan {
+            if taskPlanMonitor.isRevealed {
+                taskPlanMonitor.refresh(plan)
+            } else {
+                taskPlanMonitor.setPlan(plan)
+            }
         }
         // Signal PipelineSupport to replace the streaming message with a plan card.
         if !didDetectPlan {

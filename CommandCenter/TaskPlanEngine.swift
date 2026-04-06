@@ -879,3 +879,40 @@ enum TaskPlanTelemetry {
         await tracer.setAttribute("dag.used", value: "false", on: spanID)
     }
 }
+
+// MARK: - Deterministic Plan Bridge
+
+/// Converts a structured TaskPlan into a StreamPlan for the UI layer.
+/// This is the deterministic bridge: the InlineTaskPlanStrip gets its state
+/// from the execution engine, not from regex-parsed narrative text.
+enum TaskPlanBridge {
+
+    /// Convert a TaskPlan into a StreamPlan suitable for InlineTaskPlanMonitor.
+    /// The first step is marked `.inProgress` so the UI shows activity immediately.
+    static func streamPlan(from plan: TaskPlan) -> StreamPlan {
+        let steps = plan.steps.enumerated().map { index, step in
+            StreamPlanStep(
+                id: step.id,
+                title: TaskPlanPromptInjection.userFacingStatus(for: step),
+                ordinal: index + 1,
+                status: index == 0 ? .inProgress : .pending
+            )
+        }
+        return StreamPlan(
+            title: planTitle(from: plan),
+            steps: steps
+        )
+    }
+
+    private static func planTitle(from plan: TaskPlan) -> String {
+        let goal = plan.goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Use the first ~50 chars of the goal as the plan title.
+        if goal.count <= 50 { return goal }
+        let truncated = goal.prefix(47)
+        // Break at the last word boundary.
+        if let lastSpace = truncated.lastIndex(of: " ") {
+            return String(truncated[truncated.startIndex..<lastSpace]) + "…"
+        }
+        return String(truncated) + "…"
+    }
+}

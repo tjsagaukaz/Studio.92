@@ -398,7 +398,8 @@ enum PipelineMemoryPackStager {
         researcherOutputDir: URL? = nil,
         routingReason: String = "default",
         memoryPack: MemoryPack? = nil,
-        runtimePolicy: CommandRuntimePolicy? = nil
+        runtimePolicy: CommandRuntimePolicy? = nil,
+        dagActive: Bool = false
     ) -> String {
         let latestContext = latestAppleAPIContext(from: researcherOutputDir)
         let temporalContext = currentTemporalContext()
@@ -608,7 +609,9 @@ enum PipelineMemoryPackStager {
         </response_priority>
 
         <planning>
-        - When asked to build or change a feature, begin with a concise markdown checklist using `- [ ] Task`.
+        \(dagActive
+            ? "- When asked to build or change a feature, begin with a concise markdown checklist using `- [ ] Task`."
+            : "- Do not emit a task checklist unless the task is genuinely complex and multi-step.")
         - Prefer executing over planning. If the task is clear, skip the plan and start building.
         </planning>
 
@@ -1005,7 +1008,8 @@ final class PipelineRunOrchestrator {
         conversationHistory: [ConversationHistoryTurn],
         latencyRunID: String?,
         planContext: String? = nil,
-        dagAssessment: TaskComplexityAnalyzer.ComplexityAssessment? = nil
+        dagAssessment: TaskComplexityAnalyzer.ComplexityAssessment? = nil,
+        deterministicPlan: StreamPlan? = nil
     ) async {
         let tracer = TraceCollector()
         let runtimePolicy = CommandAccessPreferenceStore.shared.snapshot
@@ -1175,11 +1179,21 @@ final class PipelineRunOrchestrator {
             researcherOutputDir: runner.researcherOutputDir,
             routingReason: routingDecision.reason,
             memoryPack: runner.activeMemoryPack,
-            runtimePolicy: runtimePolicy
+            runtimePolicy: runtimePolicy,
+            dagActive: dagAssessment?.shouldUseDAG ?? false
         )
         if let planContext {
             systemPrompt += "\n\n" + planContext
         }
+
+        // Deterministic plan bridge: feed the structured plan to the UI monitor
+        // before the stream starts. This drives the InlineTaskPlanStrip from the
+        // execution engine, not from regex-parsed narrative text.
+        if let deterministicPlan {
+            runner.streamCoordinator.hasDeterministicPlan = true
+            runner.streamCoordinator.taskPlanMonitor.setPlan(deterministicPlan)
+        }
+
         let stream = await client.run(
             system: systemPrompt,
             userMessage: preparedInput.userMessage,
