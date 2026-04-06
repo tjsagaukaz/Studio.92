@@ -218,7 +218,7 @@ actor CodexTerminalCoordinator {
     private let projectRoot: URL
     private let session: URLSession
 
-    private static let responsesURL = URL(string: "https://api.openai.com/v1/responses")!
+    private static let responsesURL = StudioAPIConfig.openAIResponsesURL
     private static let modelCandidates = ["gpt-5.4-mini", "gpt-5.4", "gpt-5.4-nano"] + openAIBroadFallbackModels
 
     init(apiKey: String, projectRoot: URL, session: URLSession = .shared) {

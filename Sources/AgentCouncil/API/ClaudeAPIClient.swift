@@ -19,8 +19,9 @@ public actor ClaudeAPIClient {
     private let baseURL: URL
     private let session: URLSession
 
-    /// Anthropic API version header value.
-    private static let apiVersion = "2023-06-01"
+    /// Anthropic API version header value. Override via `STUDIO_ANTHROPIC_API_VERSION` env var.
+    private static let apiVersion: String =
+        ProcessInfo.processInfo.environment["STUDIO_ANTHROPIC_API_VERSION"] ?? "2023-06-01"
     private static let transientStatusCodes: Set<Int> = [429, 500, 502, 503, 504]
     private static let maxRetryAttempts = 3
     private static let maxRetryDelay: TimeInterval = 12
@@ -28,7 +29,10 @@ public actor ClaudeAPIClient {
     private static let messagesPath = "/v1/messages"
     /// Endpoint path for the token counting API.
     private static let countTokensPath = "/v1/messages/count_tokens"
-    private static let anthropicBaseURL = URL(string: "https://api.anthropic.com")!
+    private static let anthropicBaseURL: URL =
+        URL(string: ProcessInfo.processInfo.environment["STUDIO_ANTHROPIC_BASE_URL"] ?? "https://api.anthropic.com")!
+    /// Anthropic beta header for interleaved thinking.
+    private static let betaVersion = "interleaved-thinking-2025-05-14"
     private static func makeDefaultSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 300
@@ -308,7 +312,7 @@ public actor ClaudeAPIClient {
         let normalizedModel = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard normalizedModel.hasPrefix("claude-") else { return nil }
 
-        return "interleaved-thinking-2025-05-14"
+        return betaVersion
     }
 
     /// Legacy diagnostic-only estimate kept for CLI/debug surfaces.

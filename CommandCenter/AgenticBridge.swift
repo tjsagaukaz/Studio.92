@@ -9,6 +9,55 @@ import AppKit
 import AgentCouncil
 import Darwin
 
+// MARK: - Centralized API Configuration
+
+/// Single source of truth for API endpoints, versions, and timeouts.
+/// Override via environment variables for staging/testing without recompile.
+enum StudioAPIConfig {
+
+    // MARK: Anthropic
+
+    static let anthropicAPIVersion: String =
+        ProcessInfo.processInfo.environment["STUDIO_ANTHROPIC_API_VERSION"] ?? "2023-06-01"
+
+    static let anthropicBaseURL: URL =
+        URL(string: ProcessInfo.processInfo.environment["STUDIO_ANTHROPIC_BASE_URL"] ?? "https://api.anthropic.com")!
+
+    static var anthropicMessagesURL: URL {
+        anthropicBaseURL.appendingPathComponent("v1/messages")
+    }
+
+    static var anthropicCountTokensURL: URL {
+        anthropicBaseURL.appendingPathComponent("v1/messages/count_tokens")
+    }
+
+    static let anthropicBetaVersion = "interleaved-thinking-2025-05-14"
+
+    // MARK: OpenAI
+
+    static let openAIBaseURL: URL =
+        URL(string: ProcessInfo.processInfo.environment["STUDIO_OPENAI_BASE_URL"] ?? "https://api.openai.com")!
+
+    static var openAIResponsesURL: URL {
+        openAIBaseURL.appendingPathComponent("v1/responses")
+    }
+
+    static var openAIChatCompletionsURL: URL {
+        openAIBaseURL.appendingPathComponent("v1/chat/completions")
+    }
+
+    // MARK: Timeouts
+
+    static let requestTimeout: TimeInterval = 300
+    static let resourceTimeout: TimeInterval = 900
+
+    // MARK: Retry
+
+    static let transientStatusCodes: Set<Int> = [429, 500, 502, 503, 504, 529]
+    static let maxRetryAttempts = 3
+    static let maxRetryDelay: TimeInterval = 12
+}
+
 // MARK: - Agentic Client
 
 
@@ -84,13 +133,13 @@ actor AgenticClient {
         subagentMemoryContext = context
     }
 
-    static let apiVersion   = "2023-06-01"
-    static let messagesURL  = URL(string: "https://api.anthropic.com/v1/messages")!
-    static let responsesURL = URL(string: "https://api.openai.com/v1/responses")!
+    static let apiVersion   = StudioAPIConfig.anthropicAPIVersion
+    static let messagesURL  = StudioAPIConfig.anthropicMessagesURL
+    static let responsesURL = StudioAPIConfig.openAIResponsesURL
     private static let defaultSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 300
-        configuration.timeoutIntervalForResource = 900
+        configuration.timeoutIntervalForRequest = StudioAPIConfig.requestTimeout
+        configuration.timeoutIntervalForResource = StudioAPIConfig.resourceTimeout
         configuration.waitsForConnectivity = true
         return URLSession(configuration: configuration)
     }()
@@ -348,8 +397,8 @@ actor AgenticClient {
         return "Sub-agent reached its iteration limit before producing a final summary."
     }
 
-    private static let subAgentRetryStatusCodes: Set<Int> = [429, 500, 502, 503, 504, 529]
-    private static let subAgentMaxRetryAttempts = 3
+    private static let subAgentRetryStatusCodes = StudioAPIConfig.transientStatusCodes
+    private static let subAgentMaxRetryAttempts = StudioAPIConfig.maxRetryAttempts
 
     private func completeSubAgentRequest(
         system: String,

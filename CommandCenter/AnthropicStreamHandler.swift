@@ -279,7 +279,7 @@ extension AgenticClient {
         let normalizedModel = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard normalizedModel.hasPrefix("claude-") else { return nil }
 
-        return "interleaved-thinking-2025-05-14"
+        return StudioAPIConfig.anthropicBetaVersion
     }
 
     static func latencyLabel(for event: SSEEvent) -> String {

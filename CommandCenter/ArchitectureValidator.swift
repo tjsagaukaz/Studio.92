@@ -68,6 +68,15 @@ actor ArchitectureValidator {
     private var recentViolations: [ArchitectureViolation] = []
     private let maxStoredViolations = 50
 
+    private static var persistenceURL: URL {
+        URL.applicationSupportDirectory
+            .appendingPathComponent("ArchitectureViolations.json")
+    }
+
+    init() {
+        recentViolations = Self.loadFromDisk()
+    }
+
     func ingest(_ event: ArchitectureRuntimeEvent) -> [ArchitectureViolation] {
         var violations: [ArchitectureViolation] = []
 
@@ -99,6 +108,7 @@ actor ArchitectureValidator {
             if recentViolations.count > maxStoredViolations {
                 recentViolations.removeFirst(recentViolations.count - maxStoredViolations)
             }
+            saveToDisk()
         }
 
         return violations
@@ -270,5 +280,26 @@ actor ArchitectureValidator {
             message: message,
             severity: severity
         )
+    }
+
+    // MARK: - Disk Persistence
+
+    private func saveToDisk() {
+        do {
+            let data = try JSONEncoder().encode(recentViolations)
+            let dir = Self.persistenceURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try data.write(to: Self.persistenceURL, options: .atomic)
+        } catch {
+            // Best-effort — don't crash on write failures
+        }
+    }
+
+    private static func loadFromDisk() -> [ArchitectureViolation] {
+        guard let data = try? Data(contentsOf: persistenceURL),
+              let violations = try? JSONDecoder().decode([ArchitectureViolation].self, from: data) else {
+            return []
+        }
+        return violations
     }
 }

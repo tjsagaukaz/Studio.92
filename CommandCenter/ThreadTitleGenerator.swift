@@ -122,12 +122,11 @@ final class ThreadTitleGenerator: ObservableObject {
     """
 
     private static func requestTitleAnthropic(key: String, goal: String, response: String) async -> String? {
-        let url = URL(string: "https://api.anthropic.com/v1/messages")!
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: StudioAPIConfig.anthropicMessagesURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue(key, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue(StudioAPIConfig.anthropicAPIVersion, forHTTPHeaderField: "anthropic-version")
         request.timeoutInterval = 15
 
         let body: [String: Any] = [
@@ -155,8 +154,7 @@ final class ThreadTitleGenerator: ObservableObject {
     }
 
     private static func requestTitleOpenAI(key: String, goal: String, response: String) async -> String? {
-        let url = URL(string: "https://api.openai.com/v1/chat/completions")!
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: StudioAPIConfig.openAIChatCompletionsURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue("Bearer \(key)", forHTTPHeaderField: "authorization")

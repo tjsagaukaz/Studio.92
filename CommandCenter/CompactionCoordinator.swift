@@ -239,7 +239,7 @@ final class CompactionCoordinator {
             body["instructions"] = instructions
         }
 
-        let url = URL(string: "https://api.openai.com/v1/responses/compact")!
+        let url = StudioAPIConfig.openAIBaseURL.appendingPathComponent("v1/responses/compact")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -338,12 +338,11 @@ final class CompactionCoordinator {
             ]
         ]
 
-        let url = URL(string: "https://api.anthropic.com/v1/messages")!
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: StudioAPIConfig.anthropicMessagesURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue(StudioAPIConfig.anthropicAPIVersion, forHTTPHeaderField: "anthropic-version")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await session.data(for: request)
@@ -427,7 +426,7 @@ final class CompactionCoordinator {
             body["tools"] = tools
         }
 
-        let url = URL(string: "https://api.openai.com/v1/responses/input_tokens")!
+        let url = StudioAPIConfig.openAIBaseURL.appendingPathComponent("v1/responses/input_tokens")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -463,12 +462,12 @@ final class CompactionCoordinator {
             body["tools"] = tools
         }
 
-        let url = URL(string: "https://api.anthropic.com/v1/messages/count_tokens")!
+        let url = StudioAPIConfig.anthropicCountTokensURL
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue(StudioAPIConfig.anthropicAPIVersion, forHTTPHeaderField: "anthropic-version")
 
         guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else { return nil }
         request.httpBody = bodyData

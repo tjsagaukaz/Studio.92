@@ -17,6 +17,14 @@ DerivedData/
 .studio92/sessions/
 .studio92/worktrees/
 
+# Credentials & secrets
+.env
+.env.*
+Credentials.json
+*.keychain
+*.keychain-db
+secrets/
+
 # Temp artifacts
 waveletNoiseTile.bin
 tmp_neural_core_scene.py

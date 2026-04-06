@@ -41,6 +41,8 @@ struct FleetSidebar: View {
     let onNewThread: () -> Void
     let onCollapseSidebar: () -> Void
 
+    @Environment(\.openSettings) private var openSettings
+
     @State private var areWorkspacesExpanded = true
     @State private var areJobsExpanded = true
     @State private var isProjectsExpanded = true
@@ -182,7 +184,7 @@ struct FleetSidebar: View {
                 workspacePath: currentWorkspacePath,
                 onOpenWorkspace: onOpenWorkspace,
                 onOpenSettings: {
-                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    openSettings()
                 }
             )
         }
