@@ -392,10 +392,16 @@ struct MinimalComposerDock: View {
 
                 ZStack(alignment: .topLeading) {
                     if goalText.isEmpty && showPlaceholder {
-                        Text(runner.isRunning ? "" : (isIndexing ? "Indexing workspace…" : "Ask Studio.92"))
+                        Text(runner.isRunning
+                             ? runner.statusMessage
+                             : (isIndexing ? "Indexing workspace…" : "Ask Studio.92"))
                             .font(isIndexing ? StudioTypography.footnoteSemibold.monospaced() : StudioTypography.subheadline)
-                            .foregroundStyle(commandPlaceholderColor)
+                            .foregroundStyle(runner.isRunning
+                                             ? commandPlaceholderColor.opacity(0.5)
+                                             : commandPlaceholderColor)
                             .padding(.top, StudioSpacing.xs)
+                            .contentTransition(.numericText())
+                            .animation(StudioMotion.emphasisFade, value: runner.statusMessage)
                             .allowsHitTesting(false)
                     }
 

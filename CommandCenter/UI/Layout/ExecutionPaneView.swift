@@ -331,20 +331,6 @@ struct ExecutionPaneView: View {
                 CommandPolicyStrip(runner: runner)
                     .frame(maxWidth: columnWidth - 6, alignment: .leading)
                     .padding(.top, StudioSpacing.sm)
-
-                // Inline step description — visible only during runs
-                if runner.isRunning && !runner.isCancelling {
-                    Text(runner.statusMessage)
-                        .font(StudioTypography.microMedium)
-                        .foregroundStyle(StudioTextColorDark.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(maxWidth: columnWidth - 40)
-                        .padding(.top, StudioSpacing.sm)
-                        .contentTransition(.numericText())
-                        .animation(StudioMotion.emphasisFade, value: runner.statusMessage)
-                        .transition(.studioCollapse)
-                }
             }
         }
         .frame(maxWidth: .infinity)

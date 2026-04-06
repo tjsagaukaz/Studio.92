@@ -1366,19 +1366,6 @@ struct ResponseActionRow: View {
 
     var body: some View {
         HStack(spacing: StudioSpacing.xxl) {
-            if let copyableResponseText {
-                InlineActionButton(
-                    title: "Copy",
-                    systemImage: "doc.on.doc",
-                    isHighlighted: highlightedAction == .copy,
-                    isDisabled: false
-                ) {
-                    trigger(.copy) {
-                        writeTextToPasteboard(copyableResponseText)
-                    }
-                }
-            }
-
             if turn.isHistorical {
                 if hasDiffSource {
                     InlineActionButton(
@@ -1460,6 +1447,21 @@ struct ResponseActionRow: View {
             }
 
             Spacer(minLength: 0)
+
+            // Copy lives at the trailing edge — anchored to the right margin,
+            // never floating above content cards.
+            if let copyableResponseText {
+                InlineActionButton(
+                    title: "Copy",
+                    systemImage: "doc.on.doc",
+                    isHighlighted: highlightedAction == .copy,
+                    isDisabled: false
+                ) {
+                    trigger(.copy) {
+                        writeTextToPasteboard(copyableResponseText)
+                    }
+                }
+            }
         }
         .font(StudioTypography.footnoteSemibold)
         .padding(.top, StudioSpacing.xxs)
@@ -2016,22 +2018,32 @@ struct AssistantNarrativeSection: View {
     var isPartial: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: StudioChatLayout.messageInternalSpacing) {
-            MarkdownMessageContent(
-                text: text,
-                isStreaming: false,
-                isPipelineRunning: isPipelineRunning
-            )
-                .foregroundStyle(StudioTextColor.primary)
+        HStack(alignment: .top, spacing: StudioSpacing.lg) {
+            // Left-border anchor — 2pt rail that groups all text belonging to this AI turn.
+            // Cyan when the turn is active/streaming; muted graphite when settled.
+            RoundedRectangle(cornerRadius: 1, style: .continuous)
+                .fill(isPipelineRunning
+                      ? StudioAccentColor.primary.opacity(0.55)
+                      : StudioTextColor.tertiary.opacity(0.18))
+                .frame(width: 2)
+                .animation(StudioMotion.softFade, value: isPipelineRunning)
 
-            // Reasoning lives in the margin tag — not inline in the bubble.
+            VStack(alignment: .leading, spacing: StudioChatLayout.messageInternalSpacing) {
+                MarkdownMessageContent(
+                    text: text,
+                    isStreaming: false,
+                    isPipelineRunning: isPipelineRunning
+                )
+                    .foregroundStyle(StudioTextColor.primary)
 
-            if isPartial {
-                Text("Partial")
-                    .font(StudioTypography.microMedium)
-                    .foregroundStyle(StudioTextColor.tertiary)
-                    .padding(.top, StudioSpacing.xxs)
+                if isPartial {
+                    Text("Partial")
+                        .font(StudioTypography.microMedium)
+                        .foregroundStyle(StudioTextColor.tertiary)
+                        .padding(.top, StudioSpacing.xxs)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .foregroundStyle(textColor)

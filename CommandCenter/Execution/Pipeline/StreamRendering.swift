@@ -491,18 +491,15 @@ struct StreamStepRow: View {
                 stepHeader
 
                 if let actionLabel = deepLinkActionLabel, let deepLink = step.deepLink {
-                    HStack {
-                        Spacer(minLength: 0)
-
-                        Button(actionLabel) {
-                            streamDeepLinkRouter?.navigate(deepLink)
-                        }
-                        .buttonStyle(.plain)
-                        .font(StudioTypography.microMedium)
-                        .foregroundStyle(StudioTextColor.secondary)
+                    Button(actionLabel) {
+                        streamDeepLinkRouter?.navigate(deepLink)
                     }
+                    .buttonStyle(.plain)
+                    .font(StudioTypography.microMedium)
+                    .foregroundStyle(StudioTextColor.secondary)
                     .padding(.top, StudioSpacing.xs)
                     .padding(.bottom, isExpanded && canExpandInline ? 4 : 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 if isExpanded && canExpandInline {

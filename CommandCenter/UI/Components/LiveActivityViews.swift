@@ -343,19 +343,9 @@ struct InlineTerminalStrip: View {
             VStack(alignment: .leading, spacing: 0) {
                 // Title bar
                 HStack(spacing: StudioSpacing.md) {
-                    // Traffic-light dots (decorative)
-                    HStack(spacing: StudioSpacing.xs) {
-                        Circle().fill(Color(hex: "#FF5F57")).frame(width: 8, height: 8)
-                        Circle().fill(Color(hex: "#FEBC2E")).frame(width: 8, height: 8)
-                        Circle().fill(Color(hex: "#28C840")).frame(width: 8, height: 8)
-                    }
-                    .opacity(0.7)
-
-                    Spacer(minLength: 0)
-
-                    Text("Terminal")
-                        .font(StudioTypography.captionMedium)
-                        .foregroundStyle(Color.white.opacity(0.4))
+                    Text(">_ Terminal")
+                        .font(StudioTypography.badgeSmallMono)
+                        .foregroundStyle(Color.white.opacity(0.35))
 
                     Spacer(minLength: 0)
 
