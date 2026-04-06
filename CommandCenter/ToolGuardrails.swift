@@ -411,27 +411,27 @@ enum PlanApprovalMode: String, CaseIterable, Codable, Identifiable, Sendable {
     }
 }
 
-// MARK: - Strategy Gate Controller
+// MARK: - To-Do Gate Controller
 
 /// Manages the plan approval lifecycle: the pipeline generates a TaskPlan,
 /// pauses here, and resumes only when the user approves or the plan approval
 /// mode is set to auto-execute.
 @MainActor
 @Observable
-final class StrategyGateController {
+final class TodoGateController {
 
-    static let shared = StrategyGateController()
+    static let shared = TodoGateController()
 
     /// The plan awaiting user approval. Non-nil triggers the gate UI.
-    private(set) var pendingPlan: StrategyGateRequest?
+    private(set) var pendingPlan: TodoGateRequest?
 
     /// Whether the gate is actively blocking a pipeline run.
     var isGateActive: Bool { pendingPlan != nil }
 
-    private var continuation: CheckedContinuation<StrategyGateDecision, Never>?
+    private var continuation: CheckedContinuation<TodoGateDecision, Never>?
 
     /// Present a plan to the user and suspend until they approve, refine, or reject.
-    func requestApproval(_ request: StrategyGateRequest) async -> StrategyGateDecision {
+    func requestApproval(_ request: TodoGateRequest) async -> TodoGateDecision {
         pendingPlan = request
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
@@ -450,29 +450,29 @@ final class StrategyGateController {
         resolve(.rejected)
     }
 
-    private func resolve(_ decision: StrategyGateDecision) {
+    private func resolve(_ decision: TodoGateDecision) {
         pendingPlan = nil
         continuation?.resume(returning: decision)
         continuation = nil
     }
 }
 
-/// The data presented in the Strategy Gate card.
-struct StrategyGateRequest: Identifiable {
+/// The data presented in the To-Do Gate card.
+struct TodoGateRequest: Identifiable {
     let id = UUID()
     let goal: String
-    let steps: [StrategyGateStep]
+    let steps: [TodoGateStep]
     let modelName: String
 }
 
-struct StrategyGateStep: Identifiable {
+struct TodoGateStep: Identifiable {
     let id: String
     let ordinal: Int
     let title: String
     let phase: String?
 }
 
-enum StrategyGateDecision {
+enum TodoGateDecision {
     case approved
     case refined(feedback: String)
     case rejected

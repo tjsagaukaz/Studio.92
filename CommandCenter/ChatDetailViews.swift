@@ -305,14 +305,14 @@ struct SentReferencePill: View {
     }
 }
 
-// MARK: - Strategy Gate Card
+// MARK: - To-Do Gate Card
 
 /// A monochrome plan-confirmation card that slides into the right dead space of
 /// the center pane when DAG mode is triggered. The user reviews the proposed steps
 /// and either approves, refines via the composer, or lets auto-execute bypass it.
-struct StrategyGateCard: View {
+struct TodoGateCard: View {
 
-    let request: StrategyGateRequest
+    let request: TodoGateRequest
     let onApprove: () -> Void
     let onRefine: () -> Void
 
@@ -372,12 +372,12 @@ struct StrategyGateCard: View {
                 .foregroundStyle(Self.cyan.opacity(0.85))
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("STRATEGY")
+                Text("TO-DO")
                     .font(.system(size: 7.5, weight: .semibold))
                     .foregroundStyle(Self.cyan.opacity(0.45))
                     .tracking(1.6)
 
-                Text("\(request.steps.count)-Step Plan")
+                Text("\(request.steps.count) To-Do's")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
             }

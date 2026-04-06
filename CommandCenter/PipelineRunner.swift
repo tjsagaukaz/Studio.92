@@ -272,21 +272,21 @@ final class PipelineRunner {
         }
 
         // ═══════════════════════════════════════════════════════════════════
-        // Strategy Gate: when a DAG plan exists and the user has "Review Plans"
+        // To-Do Gate: when a DAG plan exists and the user has "Review Plans"
         // enabled, pause the pipeline and present the plan for approval.
         // ═══════════════════════════════════════════════════════════════════
         if let taskPlan, taskPlan.steps.count > 1,
            CommandAccessPreferenceStore.shared.planApprovalMode == .alwaysReview {
 
             let gateSteps = taskPlan.steps.enumerated().map { index, step in
-                StrategyGateStep(
+                TodoGateStep(
                     id: step.id,
                     ordinal: index + 1,
                     title: TaskPlanPromptInjection.userFacingStatus(for: step),
                     phase: step.phase.rawValue
                 )
             }
-            let gateRequest = StrategyGateRequest(
+            let gateRequest = TodoGateRequest(
                 goal: goal,
                 steps: gateSteps,
                 modelName: selectedModel.shortName
@@ -296,7 +296,7 @@ final class PipelineRunner {
             stage = .running
             statusMessage = "Reviewing plan…"
 
-            let decision = await StrategyGateController.shared.requestApproval(gateRequest)
+            let decision = await TodoGateController.shared.requestApproval(gateRequest)
 
             switch decision {
             case .approved:
