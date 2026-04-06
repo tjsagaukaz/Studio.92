@@ -32,8 +32,29 @@ struct TaskStep: Identifiable, Equatable, Sendable {
     var retryCount: Int = 0
     /// When set by PlanAdaptationPolicy, overrides the default model for this step.
     var recommendedRole: StudioModelRole?
+    /// Capabilities this step requires from its model (Phase 3).
+    /// Defaults from `phase.defaultCapabilities` when not explicitly set.
+    var requiredCapabilities: Set<TaskCapability>
 
     static let maxRetries = 2
+
+    init(
+        id: String,
+        intent: String,
+        phase: TaskPhase,
+        toolHint: TaskToolHint,
+        canRunInParallel: Bool = false,
+        dependsOn: [String] = [],
+        requiredCapabilities: Set<TaskCapability>? = nil
+    ) {
+        self.id = id
+        self.intent = intent
+        self.phase = phase
+        self.toolHint = toolHint
+        self.canRunInParallel = canRunInParallel
+        self.dependsOn = dependsOn
+        self.requiredCapabilities = requiredCapabilities ?? phase.defaultCapabilities
+    }
 }
 
 enum TaskPhase: String, Equatable, Sendable {
@@ -42,6 +63,17 @@ enum TaskPhase: String, Equatable, Sendable {
     case implementation // Code writes, patches, refactors
     case verification  // Build, test, lint
     case repair        // Fix errors found during verification
+
+    /// Default capability requirements for steps in this phase (Phase 3).
+    var defaultCapabilities: Set<TaskCapability> {
+        switch self {
+        case .discovery:      return [.research, .speed]
+        case .analysis:       return [.reasoning, .research]
+        case .implementation: return [.codeGeneration, .multifileEdit]
+        case .verification:   return [.review]
+        case .repair:         return [.buildRepair]
+        }
+    }
 }
 
 enum TaskToolHint: String, Equatable, Sendable {
@@ -336,8 +368,7 @@ enum TaskPlanGenerator {
                 phase: phase,
                 toolHint: toolHint(for: phase),
                 canRunInParallel: phase == .discovery,
-                dependsOn: previousPhaseStepIDs,
-                status: .pending
+                dependsOn: previousPhaseStepIDs
             )
             steps.append(step)
             previousPhaseStepIDs = [stepID]
@@ -704,6 +735,7 @@ actor TaskPlanExecutor {
                 "dag.step.intent": step.intent,
                 "dag.step.retry": "\(step.retryCount)",
                 "dag.step.rerouted": step.recommendedRole.map(\.rawValue) ?? "none",
+                "dag.step.capabilities": step.requiredCapabilities.map(\.rawValue).sorted().joined(separator: ","),
                 "dag.step.adaptation_id": plan.lastAdaptationIDByStep[step.id]?.uuidString ?? "none"
             ]
         )

@@ -867,3 +867,188 @@ final class TraceLogContractTests: XCTestCase {
         XCTAssertTrue(kinds.contains(.retry))
     }
 }
+
+// MARK: - D. Phase 3 — Capability-Based Routing Tests
+
+final class CapabilityRoutingTests: XCTestCase {
+
+    // MARK: 1. Discovery Phase Routes to Cheapest Capable Model
+
+    func testDiscoveryPhaseRoutesToExplorer() {
+        // Discovery requires [.research, .speed] — explorer is the cheapest match.
+        let context = StudioModelStrategy.RoutingContext(
+            goal: "Read project files",
+            requiredCapabilities: TaskPhase.discovery.defaultCapabilities
+        )
+        let decision = StudioModelStrategy.routingDecision(context: context)
+
+        XCTAssertEqual(decision.model.role, .explorer, "Discovery should route to explorer (cheapest with research+speed)")
+        XCTAssertEqual(decision.strategy, .capabilityMatch)
+        XCTAssertEqual(decision.reason, "capability_match")
+        XCTAssertNotNil(decision.candidateRoles)
+        XCTAssertTrue(decision.candidateRoles!.contains(.explorer))
+    }
+
+    // MARK: 2. Implementation Phase Routes to Subagent (cheapest with codeGen+multifileEdit)
+
+    func testImplementationPhaseRoutesToReview() {
+        // Implementation requires [.codeGeneration, .multifileEdit].
+        // review/fullSend are equivalent cost but review is listed first alphabetically —
+        // actually review is the first entry in costProfiles that satisfies both.
+        let context = StudioModelStrategy.RoutingContext(
+            goal: "Write the new feature",
+            requiredCapabilities: TaskPhase.implementation.defaultCapabilities
+        )
+        let decision = StudioModelStrategy.routingDecision(context: context)
+
+        // Both review and fullSend satisfy [codeGeneration, multifileEdit] at the same cost.
+        // The router picks the first matching by cost sort — they tie, so insertion order wins.
+        let role = decision.model.role
+        XCTAssertTrue(role == .review || role == .fullSend,
+                      "Implementation should route to review or fullSend (cheapest with codeGen+multifileEdit), got \(role)")
+        XCTAssertEqual(decision.strategy, .capabilityMatch)
+    }
+
+    // MARK: 3. Verification Phase Routes to Review
+
+    func testVerificationPhaseRoutesToReview() {
+        // Verification requires [.review] — review is cheapest with that capability.
+        let context = StudioModelStrategy.RoutingContext(
+            goal: "Run tests",
+            requiredCapabilities: TaskPhase.verification.defaultCapabilities
+        )
+        let decision = StudioModelStrategy.routingDecision(context: context)
+
+        XCTAssertEqual(decision.model.role, .review, "Verification should route to review")
+        XCTAssertEqual(decision.strategy, .capabilityMatch)
+    }
+
+    // MARK: 4. Repair Phase Routes to Subagent
+
+    func testRepairPhaseRoutesToSubagent() {
+        // Repair requires [.buildRepair] — subagent is cheapest with that capability.
+        let context = StudioModelStrategy.RoutingContext(
+            goal: "Fix build errors",
+            requiredCapabilities: TaskPhase.repair.defaultCapabilities
+        )
+        let decision = StudioModelStrategy.routingDecision(context: context)
+
+        XCTAssertEqual(decision.model.role, .subagent, "Repair should route to subagent (cheapest with buildRepair)")
+        XCTAssertEqual(decision.strategy, .capabilityMatch)
+    }
+
+    // MARK: 5. Explicit Escalation Overrides Capability Match
+
+    func testExplicitEscalationOverridesCapabilities() {
+        // Even with cheap capabilities required, explicit "use opus" wins.
+        let context = StudioModelStrategy.RoutingContext(
+            goal: "use opus to read project files",
+            requiredCapabilities: [.research, .speed]
+        )
+        let decision = StudioModelStrategy.routingDecision(context: context)
+
+        XCTAssertEqual(decision.model.role, .escalation, "Explicit escalation must override capability match")
+        XCTAssertEqual(decision.reason, "explicit_escalation")
+    }
+
+    // MARK: 6. Failure Escalation Overrides Capability Match
+
+    func testFailureEscalationOverridesCapabilities() {
+        let context = StudioModelStrategy.RoutingContext(
+            goal: "Read project files",
+            consecutiveFailures: 3,
+            lastFailedGoal: "Read project files",
+            requiredCapabilities: [.research, .speed]
+        )
+        let decision = StudioModelStrategy.routingDecision(context: context)
+
+        XCTAssertEqual(decision.model.role, .escalation, "Failure escalation must override capability match")
+        XCTAssertEqual(decision.reason, "failure_escalation")
+    }
+
+    // MARK: 7. Cost Profile Satisfies Correctly
+
+    func testCostProfileSatisfies() {
+        let profile = ModelCostProfile(
+            role: .review,
+            costPerMInputTokens: 3.0,
+            costPerMOutputTokens: 15.0,
+            latencyP50Ms: 600,
+            capabilities: [.codeGeneration, .reasoning, .review]
+        )
+
+        XCTAssertTrue(profile.satisfies([.review]))
+        XCTAssertTrue(profile.satisfies([.codeGeneration, .reasoning]))
+        XCTAssertFalse(profile.satisfies([.buildRepair]), "review profile should not satisfy buildRepair")
+        XCTAssertTrue(profile.satisfies([]), "Empty requirements should always be satisfied")
+    }
+
+    // MARK: 8. Default Capabilities from TaskPhase
+
+    func testTaskPhaseDefaultCapabilities() {
+        XCTAssertEqual(TaskPhase.discovery.defaultCapabilities, [.research, .speed])
+        XCTAssertEqual(TaskPhase.analysis.defaultCapabilities, [.reasoning, .research])
+        XCTAssertEqual(TaskPhase.implementation.defaultCapabilities, [.codeGeneration, .multifileEdit])
+        XCTAssertEqual(TaskPhase.verification.defaultCapabilities, [.review])
+        XCTAssertEqual(TaskPhase.repair.defaultCapabilities, [.buildRepair])
+    }
+
+    // MARK: 9. TaskStep Inherits Phase Capabilities by Default
+
+    func testTaskStepInheritsPhaseCapabilities() {
+        let step = TaskStep(
+            id: "test-1",
+            intent: "Explore codebase",
+            phase: .discovery,
+            toolHint: .search
+        )
+        XCTAssertEqual(step.requiredCapabilities, [.research, .speed])
+    }
+
+    // MARK: 10. TaskStep Can Override Capabilities
+
+    func testTaskStepOverridesCapabilities() {
+        let step = TaskStep(
+            id: "test-2",
+            intent: "Complex analysis requiring code generation",
+            phase: .analysis,
+            toolHint: .mixed,
+            requiredCapabilities: [.reasoning, .codeGeneration, .multifileEdit]
+        )
+        XCTAssertEqual(step.requiredCapabilities, [.reasoning, .codeGeneration, .multifileEdit])
+        // Should NOT have .research from analysis phase default
+        XCTAssertFalse(step.requiredCapabilities.contains(.research))
+    }
+
+    // MARK: 11. No Capabilities Falls Through to Default Routing
+
+    func testNilCapabilitiesFallsThrough() {
+        let context = StudioModelStrategy.RoutingContext(
+            goal: "just do something"
+        )
+        let decision = StudioModelStrategy.routingDecision(context: context)
+
+        XCTAssertEqual(decision.model.role, .fullSend, "No capabilities should fall through to default fullSend")
+        XCTAssertEqual(decision.strategy, .fallback)
+    }
+
+    // MARK: 12. Routing Decision Contains Telemetry Fields
+
+    func testRoutingDecisionContainsTelemetry() {
+        let context = StudioModelStrategy.RoutingContext(
+            goal: "Read codebase",
+            requiredCapabilities: [.research, .speed]
+        )
+        let decision = StudioModelStrategy.routingDecision(context: context)
+
+        XCTAssertEqual(decision.strategy, .capabilityMatch)
+        XCTAssertNotNil(decision.capabilitiesRequired)
+        XCTAssertTrue(decision.capabilitiesRequired!.contains(.research))
+        XCTAssertTrue(decision.capabilitiesRequired!.contains(.speed))
+        XCTAssertNotNil(decision.candidateRoles)
+        XCTAssertFalse(decision.candidateRoles!.isEmpty)
+        // matchedSignals should list the required capabilities
+        XCTAssertTrue(decision.matchedSignals.contains("research"))
+        XCTAssertTrue(decision.matchedSignals.contains("speed"))
+    }
+}

@@ -119,6 +119,84 @@ enum StudioModelRole: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+// MARK: - Task Capabilities (Phase 3)
+
+/// Coarse capability tags for matching task requirements to model strengths.
+/// Intentionally small — don't overfit. Expand only when routing data proves a gap.
+enum TaskCapability: String, CaseIterable, Codable, Sendable {
+    case codeGeneration
+    case reasoning
+    case speed
+    case multifileEdit
+    case buildRepair
+    case research
+    case review
+}
+
+// MARK: - Model Cost Profiles (Phase 3)
+
+/// Cost and capability profile for a model role. Used by the capability-match
+/// router to pick the cheapest model that satisfies a step's requirements.
+struct ModelCostProfile: Sendable {
+    let role: StudioModelRole
+    /// Cost per 1M input tokens (USD).
+    let costPerMInputTokens: Double
+    /// Cost per 1M output tokens (USD).
+    let costPerMOutputTokens: Double
+    /// Median latency to first token (ms).
+    let latencyP50Ms: Int
+    /// Capabilities this model can handle well.
+    let capabilities: Set<TaskCapability>
+
+    /// True when this profile can satisfy all required capabilities.
+    func satisfies(_ required: Set<TaskCapability>) -> Bool {
+        required.isSubset(of: capabilities)
+    }
+}
+
+extension StudioModelStrategy {
+
+    /// Default cost profiles keyed by role. Prices are approximate list rates
+    /// as of April 2026. The router uses relative ordering, not exact billing.
+    static let costProfiles: [StudioModelRole: ModelCostProfile] = [
+        .explorer: ModelCostProfile(
+            role: .explorer,
+            costPerMInputTokens: 0.80,
+            costPerMOutputTokens: 4.0,
+            latencyP50Ms: 300,
+            capabilities: [.research, .speed]
+        ),
+        .subagent: ModelCostProfile(
+            role: .subagent,
+            costPerMInputTokens: 1.50,
+            costPerMOutputTokens: 6.0,
+            latencyP50Ms: 400,
+            capabilities: [.codeGeneration, .speed, .buildRepair, .research]
+        ),
+        .review: ModelCostProfile(
+            role: .review,
+            costPerMInputTokens: 3.0,
+            costPerMOutputTokens: 15.0,
+            latencyP50Ms: 600,
+            capabilities: [.codeGeneration, .reasoning, .multifileEdit, .review, .research]
+        ),
+        .fullSend: ModelCostProfile(
+            role: .fullSend,
+            costPerMInputTokens: 3.0,
+            costPerMOutputTokens: 15.0,
+            latencyP50Ms: 600,
+            capabilities: [.codeGeneration, .reasoning, .multifileEdit, .buildRepair, .research]
+        ),
+        .escalation: ModelCostProfile(
+            role: .escalation,
+            costPerMInputTokens: 15.0,
+            costPerMOutputTokens: 75.0,
+            latencyP50Ms: 1200,
+            capabilities: [.codeGeneration, .reasoning, .multifileEdit, .buildRepair, .review, .research]
+        ),
+    ]
+}
+
 struct StudioModelDescriptor: Codable, Equatable, Hashable, Identifiable {
     let role: StudioModelRole
     let provider: ModelProvider
@@ -534,6 +612,9 @@ enum StudioModelStrategy {
         let dagStepIndex: Int?
         let dagTotalSteps: Int?
 
+        // Phase 3 — capability requirements from TaskStep
+        let requiredCapabilities: Set<TaskCapability>?
+
         init(
             goal: String,
             packageRoot: String? = nil,
@@ -544,7 +625,8 @@ enum StudioModelStrategy {
             contextPressure: Double = 0,
             dagPhase: TaskPhase? = nil,
             dagStepIndex: Int? = nil,
-            dagTotalSteps: Int? = nil
+            dagTotalSteps: Int? = nil,
+            requiredCapabilities: Set<TaskCapability>? = nil
         ) {
             self.goal = goal
             self.packageRoot = packageRoot
@@ -556,6 +638,7 @@ enum StudioModelStrategy {
             self.dagPhase = dagPhase
             self.dagStepIndex = dagStepIndex
             self.dagTotalSteps = dagTotalSteps
+            self.requiredCapabilities = requiredCapabilities
         }
 
         /// Whether the user is retrying the same failed goal.
@@ -576,8 +659,37 @@ enum StudioModelStrategy {
         let reason: String
         let matchedSignals: [String]
 
+        /// Phase 3 telemetry — which strategy selected this model.
+        enum Strategy: String {
+            case recommendedOverride = "recommended_override"
+            case capabilityMatch = "capability_match"
+            case intentSignal = "intent_signal"
+            case fallback = "fallback"
+        }
+        let strategy: Strategy
+        /// Capabilities that were required (nil for non-DAG routes).
+        let capabilitiesRequired: Set<TaskCapability>?
+        /// Roles that satisfied the capability filter (nil when not applicable).
+        let candidateRoles: [StudioModelRole]?
+
         var isReviewRoute: Bool {
             reason == "review_intent" || reason == "review_escalation"
+        }
+
+        init(
+            model: StudioModelDescriptor,
+            reason: String,
+            matchedSignals: [String],
+            strategy: Strategy = .intentSignal,
+            capabilitiesRequired: Set<TaskCapability>? = nil,
+            candidateRoles: [StudioModelRole]? = nil
+        ) {
+            self.model = model
+            self.reason = reason
+            self.matchedSignals = matchedSignals
+            self.strategy = strategy
+            self.capabilitiesRequired = capabilitiesRequired
+            self.candidateRoles = candidateRoles
         }
     }
 
@@ -632,7 +744,28 @@ enum StudioModelStrategy {
             )
         }
 
-        // 4. Review intent (without build overrides).
+        // 4. Capability-based routing (Phase 3) — when DAG provides required capabilities,
+        //    pick the cheapest model that satisfies them.
+        if let required = context.requiredCapabilities, !required.isEmpty {
+            let candidates = costProfiles
+                .filter { $0.value.satisfies(required) }
+                .sorted { $0.value.costPerMInputTokens < $1.value.costPerMInputTokens }
+            let candidateRoles = candidates.map(\.key)
+
+            if let cheapest = candidates.first {
+                return RoutingDecision(
+                    model: descriptor(for: cheapest.key, packageRoot: packageRoot),
+                    reason: "capability_match",
+                    matchedSignals: required.map(\.rawValue).sorted(),
+                    strategy: .capabilityMatch,
+                    capabilitiesRequired: required,
+                    candidateRoles: candidateRoles
+                )
+            }
+            // No model satisfies all capabilities → fall through to intent-based routing.
+        }
+
+        // 5. Review intent (without build overrides).
         let matchedReview = reviewIntentSignals.filter { normalized.contains($0) }
         let hasBuildOverride = buildIntentOverrides.contains { normalized.contains($0) }
 
@@ -644,7 +777,8 @@ enum StudioModelStrategy {
             )
         }
 
-        // 5. DAG phase-aware routing — verification steps prefer review model.
+        // 6. DAG phase-aware routing — verification steps prefer review model.
+        //    (Fires only when capability match didn't already handle it.)
         if let phase = context.dagPhase, phase == .verification {
             return RoutingDecision(
                 model: descriptor(for: .review, packageRoot: packageRoot),
@@ -653,7 +787,7 @@ enum StudioModelStrategy {
             )
         }
 
-        // 6. Auto-escalation: complex signals route to Opus when no simple build override is present.
+        // 7. Auto-escalation: complex signals route to Opus when no simple build override is present.
         let matchedComplexity = complexityEscalationSignals.filter { normalized.contains($0) }
         let hasSimpleBuildOverride = ["fix", "change", "update", "add", "delete", "remove"].contains(where: { normalized.contains($0) })
         if !matchedComplexity.isEmpty && !hasSimpleBuildOverride {
@@ -664,11 +798,12 @@ enum StudioModelStrategy {
             )
         }
 
-        // 7. Default → fullSend.
+        // 8. Default → fullSend.
         return RoutingDecision(
             model: descriptor(for: .fullSend, packageRoot: packageRoot),
             reason: "default",
-            matchedSignals: []
+            matchedSignals: [],
+            strategy: .fallback
         )
     }
 

@@ -1027,7 +1027,10 @@ final class PipelineRunOrchestrator {
                 "goal": String(goal.prefix(200)),
                 "model.role": selectedModel.role.rawValue,
                 "routing.reason": routingDecision.reason,
+                "routing.strategy": routingDecision.strategy.rawValue,
                 "routing.signals": routingDecision.matchedSignals.joined(separator: ","),
+                "routing.capabilities_required": routingDecision.capabilitiesRequired.map { $0.map(\.rawValue).sorted().joined(separator: ",") } ?? "",
+                "routing.candidates": routingDecision.candidateRoles.map { $0.map(\.rawValue).joined(separator: ",") } ?? "",
                 "task.attachment_count": String(attachments.count),
                 "task.history_turns": String(conversationHistory.count),
                 "policy.scope": runtimePolicy.accessScope.rawValue,
@@ -1651,19 +1654,50 @@ final class PipelineRunOrchestrator {
                 stepSystemPrompt += "\n\n" + supplement
             }
 
-            // Resolve model for this step (may be rerouted by adaptation policy).
+            // Resolve model for this step (may be rerouted by adaptation policy or capability match).
             let stepModel: StudioModelDescriptor
+            let stepRoutingStrategy: String
             if let role = step.recommendedRole {
+                // Phase 2: hard override from PlanAdaptationPolicy.
                 stepModel = StudioModelStrategy.descriptor(
                     for: role,
                     packageRoot: capturedPackageRoot
                 )
+                stepRoutingStrategy = "recommended_override"
+                await MainActor.run {
+                    self.runner.activeModelName = stepModel.shortName
+                }
+            } else if !step.requiredCapabilities.isEmpty {
+                // Phase 3: capability-based routing — pick cheapest viable model.
+                let capabilityDecision = StudioModelStrategy.routingDecision(
+                    context: StudioModelStrategy.RoutingContext(
+                        goal: step.intent,
+                        packageRoot: capturedPackageRoot,
+                        dagPhase: step.phase,
+                        requiredCapabilities: step.requiredCapabilities
+                    )
+                )
+                stepModel = capabilityDecision.model
+                stepRoutingStrategy = capabilityDecision.strategy.rawValue
                 await MainActor.run {
                     self.runner.activeModelName = stepModel.shortName
                 }
             } else {
                 stepModel = selectedModel
+                stepRoutingStrategy = "fallback"
             }
+
+            // Emit Phase 3 routing telemetry for this DAG step.
+            await tracer.setAttribute(
+                "dag.step.\(step.id).routing_strategy",
+                value: stepRoutingStrategy,
+                on: sessionSpanID
+            )
+            await tracer.setAttribute(
+                "dag.step.\(step.id).model",
+                value: stepModel.identifier,
+                on: sessionSpanID
+            )
 
             // Run a single streaming call for this step.
             let result = await self.runSingleDAGStep(
