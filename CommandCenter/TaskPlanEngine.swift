@@ -72,6 +72,8 @@ struct TaskPlan: Identifiable, Sendable {
     var steps: [TaskStep]
     let createdAt: Date
     var status: TaskPlanStatus = .active
+    /// Number of adaptations applied during execution. Capped by PlanAdaptationPolicy.
+    var adaptationCount: Int = 0
 
     init(goal: String, steps: [TaskStep]) {
         self.id = UUID()
@@ -467,15 +469,23 @@ enum TaskPlanPromptInjection {
 
 // MARK: - Plan Adaptation
 
+/// Typed reason codes for plan adaptations.
+/// Used for analytics, Phase 4 feedback loops, and deterministic policy matching.
+enum PlanAdaptationReason: String, Sendable {
+    case verificationPassed
+    case discoveryFailed
+    case implementationRetriesExhausted
+}
+
 /// Outcome-driven adaptations that the executor can apply between steps.
 /// Conservative by design — start with simple cases, expand later.
 enum PlanAdaptation: Equatable, Sendable {
     /// No change to the plan.
     case proceed
     /// Skip all remaining steps (e.g. verification passed, no repair needed).
-    case skipRemaining(reason: String)
+    case skipRemaining(reason: PlanAdaptationReason)
     /// Re-route a specific step to a different model role.
-    case rerouteStep(stepID: String, to: StudioModelRole)
+    case rerouteStep(stepID: String, to: StudioModelRole, reason: PlanAdaptationReason)
 }
 
 /// Decides how to adapt the plan after each step completes.
@@ -483,11 +493,19 @@ enum PlanAdaptation: Equatable, Sendable {
 enum PlanAdaptationPolicy {
 
     /// Evaluate the plan after a step completes and recommend an adaptation.
+    /// Maximum adaptations per plan to prevent pathological loops.
+    static let maxAdaptationsPerPlan = 3
+
     static func evaluate(
         plan: TaskPlan,
         completedStep: TaskStep,
         result: TaskPlanExecutor.StepResult
     ) -> PlanAdaptation {
+        // Cap: prevent runaway adaptation in future phases.
+        guard plan.adaptationCount < maxAdaptationsPerPlan else {
+            return .proceed
+        }
+
         // Rule 1: Verification succeeded → skip repair phase.
         // If verification passed cleanly, there's nothing to repair.
         if completedStep.phase == .verification && result.succeeded {
@@ -495,7 +513,7 @@ enum PlanAdaptationPolicy {
                 .filter { $0.phase == .repair && $0.status == .pending }
                 .map(\.id)
             if !pendingRepairIDs.isEmpty {
-                return .skipRemaining(reason: "verification_passed")
+                return .skipRemaining(reason: .verificationPassed)
             }
         }
 
@@ -503,7 +521,9 @@ enum PlanAdaptationPolicy {
         // If we can't even read the codebase, the task needs a stronger model.
         if completedStep.phase == .discovery && !result.succeeded {
             if let implStep = plan.steps.first(where: { $0.phase == .implementation && $0.status == .pending }) {
-                return .rerouteStep(stepID: implStep.id, to: .escalation)
+                // Anti-oscillation: don't reroute if already at target role.
+                guard implStep.recommendedRole != .escalation else { return .proceed }
+                return .rerouteStep(stepID: implStep.id, to: .escalation, reason: .discoveryFailed)
             }
         }
 
@@ -511,7 +531,9 @@ enum PlanAdaptationPolicy {
         // The implementation was already attempted — escalate the verification/fix pass.
         if completedStep.phase == .implementation && !result.succeeded && completedStep.retryCount >= TaskStep.maxRetries {
             if let verifyStep = plan.steps.first(where: { $0.phase == .verification && $0.status == .pending }) {
-                return .rerouteStep(stepID: verifyStep.id, to: .escalation)
+                // Anti-oscillation: don't reroute if already at target role.
+                guard verifyStep.recommendedRole != .escalation else { return .proceed }
+                return .rerouteStep(stepID: verifyStep.id, to: .escalation, reason: .implementationRetriesExhausted)
             }
         }
 
@@ -746,20 +768,27 @@ actor TaskPlanExecutor {
     private func applyAdaptation(_ adaptation: PlanAdaptation, spanID: UUID) async {
         switch adaptation {
         case .proceed:
-            break
+            return  // No mutation, no counter increment.
 
         case .skipRemaining(let reason):
+            plan.adaptationCount += 1
             let skippedCount = plan.steps.filter { $0.status == .pending }.count
-            plan.skipAllPending(reason: reason)
+            plan.skipAllPending(reason: reason.rawValue)
             await tracer.setAttribute("dag.adaptation", value: "skip_remaining", on: spanID)
+            await tracer.setAttribute("dag.adaptation.reason", value: reason.rawValue, on: spanID)
             await tracer.setAttribute("dag.adaptation.skipped_count", value: "\(skippedCount)", on: spanID)
-            await tracer.setAttribute("dag.adaptation.reason", value: reason, on: spanID)
+            await tracer.setAttribute("dag.adaptation.count", value: "\(plan.adaptationCount)", on: spanID)
 
-        case .rerouteStep(let stepID, let newRole):
+        case .rerouteStep(let stepID, let newRole, let reason):
+            let previousRole = plan.steps.first(where: { $0.id == stepID })?.recommendedRole
+            plan.adaptationCount += 1
             plan.setRecommendedRole(newRole, for: stepID)
             await tracer.setAttribute("dag.adaptation", value: "reroute_step", on: spanID)
-            await tracer.setAttribute("dag.adaptation.rerouted_step", value: stepID, on: spanID)
-            await tracer.setAttribute("dag.adaptation.new_role", value: newRole.rawValue, on: spanID)
+            await tracer.setAttribute("dag.adaptation.reason", value: reason.rawValue, on: spanID)
+            await tracer.setAttribute("dag.adaptation.step", value: stepID, on: spanID)
+            await tracer.setAttribute("dag.adaptation.role_before", value: previousRole?.rawValue ?? "default", on: spanID)
+            await tracer.setAttribute("dag.adaptation.role_after", value: newRole.rawValue, on: spanID)
+            await tracer.setAttribute("dag.adaptation.count", value: "\(plan.adaptationCount)", on: spanID)
         }
     }
 
