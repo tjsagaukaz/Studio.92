@@ -73,6 +73,24 @@ struct CommandPolicyStrip: View {
             }
             .menuStyle(.borderlessButton)
 
+            // Plan approval mode
+            Menu {
+                ForEach(PlanApprovalMode.allCases) { mode in
+                    Button {
+                        accessPreferences.planApprovalMode = mode
+                    } label: {
+                        Label(mode.displayName, systemImage: mode == accessPreferences.planApprovalMode ? "checkmark" : mode.symbolName)
+                    }
+                }
+            } label: {
+                commandPolicyChip(
+                    icon: accessPreferences.planApprovalMode.symbolName,
+                    title: accessPreferences.planApprovalMode.displayName,
+                    accentColor: accessPreferences.planApprovalMode == .autoExecute ? StudioAccentColor.primary : nil
+                )
+            }
+            .menuStyle(.borderlessButton)
+
             Text(policyNote)
                 .font(StudioTypography.dataMicro)
                 .foregroundStyle(StudioTextColorDark.tertiary)

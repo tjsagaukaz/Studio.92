@@ -15,6 +15,7 @@ struct ExecutionPaneView: View {
     @EnvironmentObject private var conversationStore: ConversationStore
     @ObservedObject private var commandAccess = CommandAccessPreferenceStore.shared
     @ObservedObject private var commandApproval = CommandApprovalController.shared
+    private var strategyGate: StrategyGateController { StrategyGateController.shared }
     @Binding var goalText: String
     @Binding var attachments: [ChatAttachment]
     let templateEngine: SessionTemplateEngine
@@ -157,6 +158,22 @@ struct ExecutionPaneView: View {
                         .padding(.leading, StudioSpacing.sectionGap)
                         .allowsHitTesting(false)
                 }
+                .overlay(alignment: .topTrailing) {
+                    if let pending = strategyGate.pendingPlan {
+                        StrategyGateCard(
+                            request: pending,
+                            onApprove: { strategyGate.approve() },
+                            onRefine: {
+                                goalText = ""
+                                strategyGate.refine(feedback: "")
+                            }
+                        )
+                        .padding(.top, StudioSpacing.section)
+                        .padding(.trailing, StudioSpacing.sectionGap)
+                        .transition(.studioFadeLift)
+                    }
+                }
+                .animation(StudioMotion.panelSpring, value: strategyGate.isGateActive)
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     VStack(spacing: 0) {
                         // Security gate — intercepts risky tool calls, slides up for authorization.

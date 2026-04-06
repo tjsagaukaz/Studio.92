@@ -305,6 +305,165 @@ struct SentReferencePill: View {
     }
 }
 
+// MARK: - Strategy Gate Card
+
+/// A monochrome plan-confirmation card that slides into the right dead space of
+/// the center pane when DAG mode is triggered. The user reviews the proposed steps
+/// and either approves, refines via the composer, or lets auto-execute bypass it.
+struct StrategyGateCard: View {
+
+    let request: StrategyGateRequest
+    let onApprove: () -> Void
+    let onRefine: () -> Void
+
+    @State private var appeared = false
+
+    private static let surface = Color(hex: "#14181D")
+    private static let cyan = StudioAccentColor.primary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            gateHeader
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 10)
+
+            Divider()
+                .background(Color.white.opacity(0.07))
+
+            stepList
+                .padding(.top, 8)
+                .padding(.bottom, 10)
+
+            Divider()
+                .background(Color.white.opacity(0.07))
+
+            gateActions
+                .padding(.horizontal, 14)
+                .padding(.top, 12)
+                .padding(.bottom, 14)
+        }
+        .frame(width: 280)
+        .background(
+            RoundedRectangle(cornerRadius: StudioRadius.lg, style: .continuous)
+                .fill(Self.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: StudioRadius.lg, style: .continuous)
+                .strokeBorder(Self.cyan.opacity(0.12), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.45), radius: 24, x: 0, y: 8)
+        .offset(y: appeared ? 0 : 10)
+        .opacity(appeared ? 1 : 0)
+        .scaleEffect(appeared ? 1 : 0.97)
+        .onAppear {
+            withAnimation(.spring(response: 0.38, dampingFraction: 0.82).delay(0.06)) {
+                appeared = true
+            }
+        }
+    }
+
+    // MARK: - Header
+
+    private var gateHeader: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "list.bullet.clipboard")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Self.cyan.opacity(0.85))
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("STRATEGY")
+                    .font(.system(size: 7.5, weight: .semibold))
+                    .foregroundStyle(Self.cyan.opacity(0.45))
+                    .tracking(1.6)
+
+                Text("\(request.steps.count)-Step Plan")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+
+            Spacer(minLength: 0)
+
+            // Model badge
+            Text(request.modelName)
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(Color.white.opacity(0.3))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color.white.opacity(0.05))
+                )
+        }
+    }
+
+    // MARK: - Step List
+
+    private var stepList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(request.steps) { step in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "circle.dashed")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.2))
+                        .frame(width: 14, alignment: .center)
+
+                    Text(step.title)
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(Color.white.opacity(0.65))
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 5)
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    private var gateActions: some View {
+        HStack(spacing: 8) {
+            Button {
+                withAnimation(StudioMotion.fastSpring) {
+                    onRefine()
+                }
+            } label: {
+                Text("Refine Plan")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.4))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 32)
+                    .background(Color.white.opacity(0.05))
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
+                    )
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                withAnimation(StudioMotion.fastSpring) {
+                    onApprove()
+                }
+            } label: {
+                Text("Approve & Execute")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.black)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 32)
+                    .background(Self.cyan)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .shadow(color: Self.cyan.opacity(0.35), radius: 10, x: 0, y: 2)
+        }
+    }
+}
+
 // MARK: - Security Gate Card
 
 struct SecurityGateCard: View {

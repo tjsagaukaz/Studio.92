@@ -331,12 +331,17 @@ final class CommandAccessPreferenceStore: ObservableObject {
 
     private static let accessScopeDefaultsKey = "studio92.commandAccessScope"
     private static let approvalModeDefaultsKey = "studio92.commandApprovalMode"
+    private static let planApprovalModeDefaultsKey = "studio92.planApprovalMode"
 
     @Published var accessScope: CommandAccessScope {
         didSet { persist() }
     }
 
     @Published var approvalMode: CommandApprovalMode {
+        didSet { persist() }
+    }
+
+    @Published var planApprovalMode: PlanApprovalMode {
         didSet { persist() }
     }
 
@@ -351,13 +356,124 @@ final class CommandAccessPreferenceStore: ObservableObject {
         let storedApprovalMode = defaults.string(forKey: Self.approvalModeDefaultsKey)
             .flatMap(CommandApprovalMode.init(rawValue:))
             ?? .askOnRiskyActions
+        let storedPlanApproval = defaults.string(forKey: Self.planApprovalModeDefaultsKey)
+            .flatMap(PlanApprovalMode.init(rawValue:))
+            ?? .alwaysReview
 
         self.accessScope = storedAccessScope
         self.approvalMode = storedApprovalMode
+        self.planApprovalMode = storedPlanApproval
     }
 
     private func persist() {
         UserDefaults.standard.set(accessScope.rawValue, forKey: Self.accessScopeDefaultsKey)
         UserDefaults.standard.set(approvalMode.rawValue, forKey: Self.approvalModeDefaultsKey)
+        UserDefaults.standard.set(planApprovalMode.rawValue, forKey: Self.planApprovalModeDefaultsKey)
     }
+}
+
+// MARK: - Plan Approval Mode
+
+enum PlanApprovalMode: String, CaseIterable, Codable, Identifiable, Sendable {
+    case alwaysReview = "always_review"
+    case autoExecute = "auto_execute"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .alwaysReview: return "Review Plans"
+        case .autoExecute:  return "Auto-Execute"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .alwaysReview: return "Review plans"
+        case .autoExecute:  return "Auto-execute"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .alwaysReview: return "list.bullet.clipboard"
+        case .autoExecute:  return "bolt.horizontal"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .alwaysReview:
+            return "Pause before executing multi-step plans so you can review and refine."
+        case .autoExecute:
+            return "Execute generated plans immediately without pausing for review."
+        }
+    }
+}
+
+// MARK: - Strategy Gate Controller
+
+/// Manages the plan approval lifecycle: the pipeline generates a TaskPlan,
+/// pauses here, and resumes only when the user approves or the plan approval
+/// mode is set to auto-execute.
+@MainActor
+@Observable
+final class StrategyGateController {
+
+    static let shared = StrategyGateController()
+
+    /// The plan awaiting user approval. Non-nil triggers the gate UI.
+    private(set) var pendingPlan: StrategyGateRequest?
+
+    /// Whether the gate is actively blocking a pipeline run.
+    var isGateActive: Bool { pendingPlan != nil }
+
+    private var continuation: CheckedContinuation<StrategyGateDecision, Never>?
+
+    /// Present a plan to the user and suspend until they approve, refine, or reject.
+    func requestApproval(_ request: StrategyGateRequest) async -> StrategyGateDecision {
+        pendingPlan = request
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func approve() {
+        resolve(.approved)
+    }
+
+    func refine(feedback: String) {
+        resolve(.refined(feedback: feedback))
+    }
+
+    func reject() {
+        resolve(.rejected)
+    }
+
+    private func resolve(_ decision: StrategyGateDecision) {
+        pendingPlan = nil
+        continuation?.resume(returning: decision)
+        continuation = nil
+    }
+}
+
+/// The data presented in the Strategy Gate card.
+struct StrategyGateRequest: Identifiable {
+    let id = UUID()
+    let goal: String
+    let steps: [StrategyGateStep]
+    let modelName: String
+}
+
+struct StrategyGateStep: Identifiable {
+    let id: String
+    let ordinal: Int
+    let title: String
+    let phase: String?
+}
+
+enum StrategyGateDecision {
+    case approved
+    case refined(feedback: String)
+    case rejected
 }
