@@ -74,6 +74,10 @@ struct TaskPlan: Identifiable, Sendable {
     var status: TaskPlanStatus = .active
     /// Number of adaptations applied during execution. Capped by PlanAdaptationPolicy.
     var adaptationCount: Int = 0
+    /// Tracks which steps have been adapted to enforce per-step cap.
+    var adaptedStepIDs: Set<String> = []
+    /// The adaptation ID that last affected each step — for Phase 4 correlation.
+    var lastAdaptationIDByStep: [String: UUID] = [:]
 
     init(goal: String, steps: [TaskStep]) {
         self.id = UUID()
@@ -475,17 +479,36 @@ enum PlanAdaptationReason: String, Sendable {
     case verificationPassed
     case discoveryFailed
     case implementationRetriesExhausted
+
+    /// The phase that triggered this adaptation — for aggregate analytics.
+    var triggerPhase: TaskPhase {
+        switch self {
+        case .verificationPassed:              return .verification
+        case .discoveryFailed:                 return .discovery
+        case .implementationRetriesExhausted:  return .implementation
+        }
+    }
 }
 
 /// Outcome-driven adaptations that the executor can apply between steps.
 /// Conservative by design — start with simple cases, expand later.
+/// Each non-proceed adaptation carries a stable `id` for decision → effect → outcome correlation.
 enum PlanAdaptation: Equatable, Sendable {
     /// No change to the plan.
     case proceed
     /// Skip all remaining steps (e.g. verification passed, no repair needed).
-    case skipRemaining(reason: PlanAdaptationReason)
+    case skipRemaining(id: UUID = UUID(), reason: PlanAdaptationReason)
     /// Re-route a specific step to a different model role.
-    case rerouteStep(stepID: String, to: StudioModelRole, reason: PlanAdaptationReason)
+    case rerouteStep(id: UUID = UUID(), stepID: String, to: StudioModelRole, reason: PlanAdaptationReason)
+
+    /// The stable adaptation ID, if this is a non-proceed adaptation.
+    var adaptationID: UUID? {
+        switch self {
+        case .proceed: return nil
+        case .skipRemaining(let id, _): return id
+        case .rerouteStep(let id, _, _, _): return id
+        }
+    }
 }
 
 /// Decides how to adapt the plan after each step completes.
@@ -506,6 +529,11 @@ enum PlanAdaptationPolicy {
             return .proceed
         }
 
+        // Per-step cap: prevent the same step from consuming the entire budget.
+        func stepAlreadyAdapted(_ stepID: String) -> Bool {
+            plan.adaptedStepIDs.contains(stepID)
+        }
+
         // Rule 1: Verification succeeded → skip repair phase.
         // If verification passed cleanly, there's nothing to repair.
         if completedStep.phase == .verification && result.succeeded {
@@ -521,8 +549,9 @@ enum PlanAdaptationPolicy {
         // If we can't even read the codebase, the task needs a stronger model.
         if completedStep.phase == .discovery && !result.succeeded {
             if let implStep = plan.steps.first(where: { $0.phase == .implementation && $0.status == .pending }) {
-                // Anti-oscillation: don't reroute if already at target role.
+                // Anti-oscillation: don't reroute if already at target role or already adapted.
                 guard implStep.recommendedRole != .escalation else { return .proceed }
+                guard !stepAlreadyAdapted(implStep.id) else { return .proceed }
                 return .rerouteStep(stepID: implStep.id, to: .escalation, reason: .discoveryFailed)
             }
         }
@@ -531,8 +560,9 @@ enum PlanAdaptationPolicy {
         // The implementation was already attempted — escalate the verification/fix pass.
         if completedStep.phase == .implementation && !result.succeeded && completedStep.retryCount >= TaskStep.maxRetries {
             if let verifyStep = plan.steps.first(where: { $0.phase == .verification && $0.status == .pending }) {
-                // Anti-oscillation: don't reroute if already at target role.
+                // Anti-oscillation: don't reroute if already at target role or already adapted.
                 guard verifyStep.recommendedRole != .escalation else { return .proceed }
+                guard !stepAlreadyAdapted(verifyStep.id) else { return .proceed }
                 return .rerouteStep(stepID: verifyStep.id, to: .escalation, reason: .implementationRetriesExhausted)
             }
         }
@@ -673,7 +703,8 @@ actor TaskPlanExecutor {
                 "dag.step.phase": step.phase.rawValue,
                 "dag.step.intent": step.intent,
                 "dag.step.retry": "\(step.retryCount)",
-                "dag.step.rerouted": step.recommendedRole.map(\.rawValue) ?? "none"
+                "dag.step.rerouted": step.recommendedRole.map(\.rawValue) ?? "none",
+                "dag.step.adaptation_id": plan.lastAdaptationIDByStep[step.id]?.uuidString ?? "none"
             ]
         )
 
@@ -768,23 +799,33 @@ actor TaskPlanExecutor {
     private func applyAdaptation(_ adaptation: PlanAdaptation, spanID: UUID) async {
         switch adaptation {
         case .proceed:
+            // Emit trace when cap suppressed a real evaluation.
+            if plan.adaptationCount >= PlanAdaptationPolicy.maxAdaptationsPerPlan {
+                await tracer.setAttribute("dag.adaptation.skipped_due_to_cap", value: "true", on: spanID)
+            }
             return  // No mutation, no counter increment.
 
-        case .skipRemaining(let reason):
+        case .skipRemaining(let adaptationID, let reason):
             plan.adaptationCount += 1
             let skippedCount = plan.steps.filter { $0.status == .pending }.count
             plan.skipAllPending(reason: reason.rawValue)
             await tracer.setAttribute("dag.adaptation", value: "skip_remaining", on: spanID)
+            await tracer.setAttribute("dag.adaptation.id", value: adaptationID.uuidString, on: spanID)
             await tracer.setAttribute("dag.adaptation.reason", value: reason.rawValue, on: spanID)
+            await tracer.setAttribute("dag.adaptation.trigger_phase", value: reason.triggerPhase.rawValue, on: spanID)
             await tracer.setAttribute("dag.adaptation.skipped_count", value: "\(skippedCount)", on: spanID)
             await tracer.setAttribute("dag.adaptation.count", value: "\(plan.adaptationCount)", on: spanID)
 
-        case .rerouteStep(let stepID, let newRole, let reason):
+        case .rerouteStep(let adaptationID, let stepID, let newRole, let reason):
             let previousRole = plan.steps.first(where: { $0.id == stepID })?.recommendedRole
             plan.adaptationCount += 1
+            plan.adaptedStepIDs.insert(stepID)
+            plan.lastAdaptationIDByStep[stepID] = adaptationID
             plan.setRecommendedRole(newRole, for: stepID)
             await tracer.setAttribute("dag.adaptation", value: "reroute_step", on: spanID)
+            await tracer.setAttribute("dag.adaptation.id", value: adaptationID.uuidString, on: spanID)
             await tracer.setAttribute("dag.adaptation.reason", value: reason.rawValue, on: spanID)
+            await tracer.setAttribute("dag.adaptation.trigger_phase", value: reason.triggerPhase.rawValue, on: spanID)
             await tracer.setAttribute("dag.adaptation.step", value: stepID, on: spanID)
             await tracer.setAttribute("dag.adaptation.role_before", value: previousRole?.rawValue ?? "default", on: spanID)
             await tracer.setAttribute("dag.adaptation.role_after", value: newRole.rawValue, on: spanID)
