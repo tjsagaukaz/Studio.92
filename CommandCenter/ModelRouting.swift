@@ -510,11 +510,70 @@ enum StudioModelStrategy {
         "untangle",
     ]
 
+    // MARK: - Routing Context
+
+    /// Captures pipeline state at the moment of routing so the decision layer
+    /// can consider more than just the goal string.  Every field is optional
+    /// so callers that only have a goal (e.g. resolvedModel convenience) keep
+    /// working without change.
+    struct RoutingContext {
+        let goal: String
+        let packageRoot: String?
+
+        // Pipeline state
+        let consecutiveFailures: Int
+        let lastFailedGoal: String?
+        let conversationTurnCount: Int
+        let attachmentCount: Int
+
+        // Context window pressure (0.0–1.0, from CompactionCoordinator)
+        let contextPressure: Double
+
+        // DAG state — non-nil when TaskPlanEngine is active
+        let dagPhase: TaskPhase?
+        let dagStepIndex: Int?
+        let dagTotalSteps: Int?
+
+        init(
+            goal: String,
+            packageRoot: String? = nil,
+            consecutiveFailures: Int = 0,
+            lastFailedGoal: String? = nil,
+            conversationTurnCount: Int = 0,
+            attachmentCount: Int = 0,
+            contextPressure: Double = 0,
+            dagPhase: TaskPhase? = nil,
+            dagStepIndex: Int? = nil,
+            dagTotalSteps: Int? = nil
+        ) {
+            self.goal = goal
+            self.packageRoot = packageRoot
+            self.consecutiveFailures = consecutiveFailures
+            self.lastFailedGoal = lastFailedGoal
+            self.conversationTurnCount = conversationTurnCount
+            self.attachmentCount = attachmentCount
+            self.contextPressure = contextPressure
+            self.dagPhase = dagPhase
+            self.dagStepIndex = dagStepIndex
+            self.dagTotalSteps = dagTotalSteps
+        }
+
+        /// Whether the user is retrying the same failed goal.
+        var isRetryingFailedGoal: Bool {
+            consecutiveFailures > 0 && lastFailedGoal == goal
+        }
+
+        /// Whether context pressure is high enough to prefer cheaper models.
+        var isUnderContextPressure: Bool {
+            contextPressure >= 0.65
+        }
+    }
+
     // MARK: - Routing Decision
 
     struct RoutingDecision {
         let model: StudioModelDescriptor
-        let reason: String          // "default", "review_intent", "review_escalation", "explicit_escalation", "complexity_escalation"
+        let reason: String
         let matchedSignals: [String]
 
         var isReviewRoute: Bool {
@@ -531,10 +590,20 @@ enum StudioModelStrategy {
         return routingDecision(for: goal, packageRoot: packageRoot).model
     }
 
-    static func routingDecision(for goal: String, packageRoot: String? = nil) -> RoutingDecision {
-        let normalized = goal.lowercased()
+    // MARK: - Primary Routing Entry Points
 
-        // Explicit Opus triggers — highest priority.
+    /// Convenience overload — wraps the goal string in a minimal RoutingContext.
+    static func routingDecision(for goal: String, packageRoot: String? = nil) -> RoutingDecision {
+        let context = RoutingContext(goal: goal, packageRoot: packageRoot)
+        return routingDecision(context: context)
+    }
+
+    /// Full context-aware routing decision.
+    static func routingDecision(context: RoutingContext) -> RoutingDecision {
+        let normalized = context.goal.lowercased()
+        let packageRoot = context.packageRoot
+
+        // 1. Explicit Opus triggers — highest priority.
         let matchedEscalation = escalationIntentSignals.filter { normalized.contains($0) }
         if !matchedEscalation.isEmpty {
             return RoutingDecision(
@@ -544,7 +613,7 @@ enum StudioModelStrategy {
             )
         }
 
-        // Review + depth signals → Opus as deep reviewer.
+        // 2. Review + depth signals → Opus as deep reviewer.
         let matchedReviewEscalation = reviewEscalationSignals.filter { normalized.contains($0) }
         if !matchedReviewEscalation.isEmpty {
             return RoutingDecision(
@@ -554,6 +623,16 @@ enum StudioModelStrategy {
             )
         }
 
+        // 3. Failure-driven escalation — same goal failed 2+ times, escalate to Opus.
+        if context.isRetryingFailedGoal && context.consecutiveFailures >= 2 {
+            return RoutingDecision(
+                model: descriptor(for: .escalation, packageRoot: packageRoot),
+                reason: "failure_escalation",
+                matchedSignals: ["consecutive_failures:\(context.consecutiveFailures)"]
+            )
+        }
+
+        // 4. Review intent (without build overrides).
         let matchedReview = reviewIntentSignals.filter { normalized.contains($0) }
         let hasBuildOverride = buildIntentOverrides.contains { normalized.contains($0) }
 
@@ -565,7 +644,16 @@ enum StudioModelStrategy {
             )
         }
 
-        // Auto-escalation: complex signals route to Opus when no simple build override is present.
+        // 5. DAG phase-aware routing — verification steps prefer review model.
+        if let phase = context.dagPhase, phase == .verification {
+            return RoutingDecision(
+                model: descriptor(for: .review, packageRoot: packageRoot),
+                reason: "dag_verification",
+                matchedSignals: ["phase:verification"]
+            )
+        }
+
+        // 6. Auto-escalation: complex signals route to Opus when no simple build override is present.
         let matchedComplexity = complexityEscalationSignals.filter { normalized.contains($0) }
         let hasSimpleBuildOverride = ["fix", "change", "update", "add", "delete", "remove"].contains(where: { normalized.contains($0) })
         if !matchedComplexity.isEmpty && !hasSimpleBuildOverride {
@@ -576,6 +664,7 @@ enum StudioModelStrategy {
             )
         }
 
+        // 7. Default → fullSend.
         return RoutingDecision(
             model: descriptor(for: .fullSend, packageRoot: packageRoot),
             reason: "default",

@@ -160,7 +160,15 @@ final class PipelineRunner {
         let resolvedAnthropicKey = StudioModelStrategy.credential(provider: .anthropic, storedValue: apiKey)
         let resolvedOpenAIKey = StudioModelStrategy.credential(provider: .openAI, storedValue: openAIKey)
 
-        // Model selection: manual pin > keyword routing > default
+        // Track consecutive failures for DAG escalation and routing context.
+        let failureCount: Int
+        if lastFailedGoal == goal {
+            failureCount = consecutiveFailureCount
+        } else {
+            failureCount = 0
+        }
+
+        // Model selection: manual pin > context-aware routing > keyword routing > default
         let routing: StudioModelStrategy.RoutingDecision
         if let pinned = pinnedModelIdentifier {
             let pinnedDescriptor = StudioModelStrategy.descriptorForIdentifier(pinned, packageRoot: packageRoot)
@@ -170,19 +178,20 @@ final class PipelineRunner {
                 matchedSignals: []
             )
         } else {
-            routing = StudioModelStrategy.routingDecision(for: goal, packageRoot: packageRoot)
+            let routingContext = StudioModelStrategy.RoutingContext(
+                goal: goal,
+                packageRoot: packageRoot,
+                consecutiveFailures: failureCount,
+                lastFailedGoal: lastFailedGoal,
+                conversationTurnCount: conversationHistory.count,
+                attachmentCount: attachments.count,
+                contextPressure: compactionCoordinator.contextPressure
+            )
+            routing = StudioModelStrategy.routingDecision(context: routingContext)
         }
         let selectedModel = routing.model
         activeModelName = selectedModel.shortName
         primaryModelName = selectedModel.shortName
-
-        // Track consecutive failures for DAG escalation.
-        let failureCount: Int
-        if lastFailedGoal == goal {
-            failureCount = consecutiveFailureCount
-        } else {
-            failureCount = 0
-        }
 
         // Complexity assessment — decides if DAG orchestration is warranted.
         let complexity = TaskComplexityAnalyzer.analyze(
