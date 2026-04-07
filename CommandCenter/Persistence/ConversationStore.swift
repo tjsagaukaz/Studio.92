@@ -27,6 +27,15 @@ enum ToolType: String, Codable {
     case fileWrite
     case filePatch
     case listFiles
+    case screenshotSimulator
+    case xcodeBuild
+    case xcodeTest
+    case xcodePreview
+    case multimodalAnalyze
+    case gitStatus
+    case gitDiff
+    case gitCommit
+    case simulatorLaunchApp
 }
 
 struct ToolCall: Identifiable, Equatable {
@@ -1088,7 +1097,9 @@ final class ConversationStore: ObservableObject {
         switch toolCall.toolType {
         case .fileRead, .fileWrite, .filePatch:
             return extractPath(from: toolCall.command)
-        case .webSearch, .webFetch, .terminal, .listFiles:
+        case .webSearch, .webFetch, .terminal, .listFiles,
+             .screenshotSimulator, .xcodeBuild, .xcodeTest, .xcodePreview,
+             .multimodalAnalyze, .gitStatus, .gitDiff, .gitCommit, .simulatorLaunchApp:
             return nil
         }
     }
@@ -1169,7 +1180,9 @@ final class ConversationStore: ObservableObject {
                 return [path]
             }
             return []
-        case .terminal, .listFiles, .webSearch, .webFetch:
+        case .terminal, .listFiles, .webSearch, .webFetch,
+             .screenshotSimulator, .xcodeBuild, .xcodeTest, .xcodePreview,
+             .multimodalAnalyze, .gitStatus, .gitDiff, .gitCommit, .simulatorLaunchApp:
             return []
         }
     }
@@ -1196,20 +1209,22 @@ final class ConversationStore: ObservableObject {
 
     private static func traceTitle(for toolCall: ToolCall, fallback: String) -> String {
         switch toolCall.toolType {
-        case .webSearch:
-            return toolCall.command.isEmpty ? "Searching the web" : toolCall.command
-        case .webFetch:
-            return toolCall.command.isEmpty ? "Fetching resource" : toolCall.command
-        case .terminal:
-            return toolCall.command.isEmpty ? fallback : toolCall.command
-        case .fileRead:
-            return toolCall.command.isEmpty ? "Reading file" : toolCall.command
-        case .fileWrite:
-            return toolCall.command.isEmpty ? "Writing file" : toolCall.command
-        case .filePatch:
-            return toolCall.command.isEmpty ? "Patching file" : toolCall.command
-        case .listFiles:
-            return toolCall.command.isEmpty ? "Inspecting files" : toolCall.command
+        case .webSearch:            return toolCall.command.isEmpty ? "Searching the web" : toolCall.command
+        case .webFetch:             return toolCall.command.isEmpty ? "Fetching resource" : toolCall.command
+        case .terminal:             return toolCall.command.isEmpty ? fallback : toolCall.command
+        case .fileRead:             return toolCall.command.isEmpty ? "Reading file" : toolCall.command
+        case .fileWrite:            return toolCall.command.isEmpty ? "Writing file" : toolCall.command
+        case .filePatch:            return toolCall.command.isEmpty ? "Patching file" : toolCall.command
+        case .listFiles:            return toolCall.command.isEmpty ? "Inspecting files" : toolCall.command
+        case .screenshotSimulator:  return "Capturing screenshot"
+        case .xcodeBuild:           return toolCall.command.isEmpty ? "Building project" : toolCall.command
+        case .xcodeTest:            return toolCall.command.isEmpty ? "Running tests" : toolCall.command
+        case .xcodePreview:         return "Build, launch & screenshot"
+        case .multimodalAnalyze:    return toolCall.command.isEmpty ? "Analyzing image" : toolCall.command
+        case .gitStatus:            return "Checking git status"
+        case .gitDiff:              return toolCall.command.isEmpty ? "Viewing diff" : toolCall.command
+        case .gitCommit:            return toolCall.command.isEmpty ? "Committing changes" : toolCall.command
+        case .simulatorLaunchApp:   return toolCall.command.isEmpty ? "Launching app" : toolCall.command
         }
     }
 
@@ -1229,6 +1244,18 @@ final class ConversationStore: ObservableObject {
             return .write
         case .filePatch:
             return .edit
+        case .screenshotSimulator:
+            return .screenshot
+        case .xcodeBuild, .xcodeTest, .xcodePreview:
+            return .build
+        case .multimodalAnalyze:
+            return .read
+        case .gitStatus, .gitDiff:
+            return .read
+        case .gitCommit:
+            return .write
+        case .simulatorLaunchApp:
+            return .terminal
         case .terminal:
             let context = "\(toolCall.command)\n\(fallbackTitle)\n\(stepID)".lowercased()
             if context.contains("screenshot") || context.contains("simctl io") {

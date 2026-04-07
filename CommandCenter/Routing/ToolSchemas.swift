@@ -18,9 +18,12 @@ enum DefaultToolSchemas {
         ]
     }
 
-    static let explorerTools: [[String: Any]] = [fileRead, listFiles, webSearch]
+    static let explorerTools: [[String: Any]] = [
+        fileRead, listFiles, webSearch, webFetch, gitStatus, gitDiff
+    ]
     static let reviewerTools: [[String: Any]] = [
-        fileRead, fileWrite, filePatch, listFiles, terminal, webSearch
+        fileRead, fileWrite, filePatch, listFiles, terminal, webSearch, webFetch,
+        xcodeBuild, xcodeTest, gitStatus, gitDiff
     ]
     static let leanOperator: [[String: Any]] = [
         fileRead,
@@ -30,7 +33,14 @@ enum DefaultToolSchemas {
         delegateToExplorer,
         delegateToReviewer,
         terminal,
-        webSearch
+        webSearch,
+        webFetch,
+        xcodeBuild,
+        xcodeTest,
+        screenshotSimulator,
+        gitStatus,
+        gitDiff,
+        gitCommit
     ]
     static let all: [[String: Any]] = [
         fileRead,
@@ -42,7 +52,17 @@ enum DefaultToolSchemas {
         delegateToWorktree,
         terminal,
         webSearch,
-        deployToTestFlight
+        webFetch,
+        deployToTestFlight,
+        screenshotSimulator,
+        xcodeBuild,
+        xcodeTest,
+        xcodePreview,
+        multimodalAnalyze,
+        gitStatus,
+        gitDiff,
+        gitCommit,
+        simulatorLaunchApp
     ]
 
     static let fileRead: [String: Any] = [
@@ -219,6 +239,159 @@ enum DefaultToolSchemas {
                 "lane": ["type": "string", "description": "Optional Fastlane lane name. Defaults to beta."]
             ] as [String: Any],
             required: ["lane"]
+        )
+    ]
+
+    // MARK: - Web Fetch
+
+    static let webFetch: [String: Any] = [
+        "name": "web_fetch",
+        "description": "Fetch the contents of a web page at a given URL and return the body text. Use this when you need to read documentation, release notes, API references, or any specific URL. Prefer web_search when you do not have a specific URL. Returns plain text extracted from the HTML response.",
+        "strict": true,
+        "input_schema": closedObjectSchema(
+            properties: [
+                "url": ["type": "string", "description": "The URL to fetch."]
+            ] as [String: Any],
+            required: ["url"]
+        )
+    ]
+
+    // MARK: - Screenshot Simulator
+
+    static let screenshotSimulator: [String: Any] = [
+        "name": "screenshot_simulator",
+        "description": "Capture a screenshot of the currently booted iOS Simulator and return the image path. Use this after a build succeeds to visually confirm the UI renders correctly, or whenever you need to inspect the current simulator state. The screenshot is saved as a PNG and can be passed to multimodal_analyze for detailed inspection.",
+        "strict": true,
+        "input_schema": closedObjectSchema(
+            properties: [
+                "device_udid": ["type": "string", "description": "Optional simulator device UDID. Uses the currently selected device if omitted."]
+            ] as [String: Any],
+            required: []
+        )
+    ]
+
+    // MARK: - Xcode Build
+
+    static let xcodeBuild: [String: Any] = [
+        "name": "xcode_build",
+        "description": "Build the project using swift build or xcodebuild and return a structured build report with errors, warnings, and affected files. Use this to verify code compiles after making changes. Defaults to swift build for SPM projects. Provide a scheme for Xcode workspace builds.",
+        "strict": true,
+        "input_schema": closedObjectSchema(
+            properties: [
+                "command": ["type": "string", "description": "Build command to run. Defaults to 'swift build'."],
+                "scheme": ["type": "string", "description": "Xcode scheme name for xcodebuild. Optional."],
+                "configuration": ["type": "string", "description": "Build configuration (Debug/Release). Defaults to Debug."]
+            ] as [String: Any],
+            required: []
+        )
+    ]
+
+    // MARK: - Xcode Test
+
+    static let xcodeTest: [String: Any] = [
+        "name": "xcode_test",
+        "description": "Run the project test suite using swift test or xcodebuild test and return a structured report with pass/fail counts, individual test failures, file locations, and error messages. Use this after code changes to verify nothing is broken.",
+        "strict": true,
+        "input_schema": closedObjectSchema(
+            properties: [
+                "command": ["type": "string", "description": "Test command to run. Defaults to 'swift test'."],
+                "filter": ["type": "string", "description": "Optional test filter pattern (e.g. 'MyTestClass/testSpecificCase')."]
+            ] as [String: Any],
+            required: []
+        )
+    ]
+
+    // MARK: - Xcode Preview
+
+    static let xcodePreview: [String: Any] = [
+        "name": "xcode_preview",
+        "description": "Build the app, install it on the simulator, launch it, and capture a screenshot — all in one step. Use this as a full end-to-end visual verification after implementing UI changes. Returns the build report and screenshot path.",
+        "strict": true,
+        "input_schema": closedObjectSchema(
+            properties: [
+                "scheme": ["type": "string", "description": "Xcode scheme to build. Optional for SPM projects."],
+                "device_udid": ["type": "string", "description": "Simulator device UDID. Uses selected device if omitted."],
+                "bundle_id": ["type": "string", "description": "App bundle identifier for launch."]
+            ] as [String: Any],
+            required: ["bundle_id"]
+        )
+    ]
+
+    // MARK: - Multimodal Analyze
+
+    static let multimodalAnalyze: [String: Any] = [
+        "name": "multimodal_analyze",
+        "description": "Analyze an image using vision capabilities. Supports screenshots, diagrams, UI mockups, and any visual content. Choose a preset for the analysis style: quick_qa (fast general question), dense_screenshot (full-res UI analysis), ocr_transcribe (extract text), diagram_reasoning (charts/tables), locate_region (find a specific area), deep_inspect (two-pass zoom analysis).",
+        "strict": true,
+        "input_schema": closedObjectSchema(
+            properties: [
+                "image_path": ["type": "string", "description": "Path to the image file to analyze."],
+                "question": ["type": "string", "description": "What to analyze or ask about the image."],
+                "preset": ["type": "string", "description": "Analysis preset: quick_qa, dense_screenshot, ocr_transcribe, diagram_reasoning, locate_region, deep_inspect. Defaults to quick_qa."]
+            ] as [String: Any],
+            required: ["image_path", "question"]
+        )
+    ]
+
+    // MARK: - Git Status
+
+    static let gitStatus: [String: Any] = [
+        "name": "git_status",
+        "description": "Return the current git repository status including branch name, staged/unstaged/untracked file counts, and a list of changed files with their status codes. Use this to understand the working tree state before committing or to check if there are uncommitted changes.",
+        "strict": true,
+        "input_schema": closedObjectSchema(
+            properties: [:] as [String: Any],
+            required: []
+        )
+    ]
+
+    // MARK: - Git Diff
+
+    static let gitDiff: [String: Any] = [
+        "name": "git_diff",
+        "description": "Return the git diff output showing changes in the working tree. By default shows unstaged changes; use staged: true to see staged changes. Optionally scope to a specific file path.",
+        "strict": true,
+        "input_schema": closedObjectSchema(
+            properties: [
+                "staged": ["type": "boolean", "description": "If true, show staged changes (--cached). Defaults to false."],
+                "path": ["type": "string", "description": "Optional file path to scope the diff."]
+            ] as [String: Any],
+            required: []
+        )
+    ]
+
+    // MARK: - Git Commit
+
+    static let gitCommit: [String: Any] = [
+        "name": "git_commit",
+        "description": "Stage the specified files (or all changes) and create a git commit with the given message. Use this only when the user explicitly asks to commit. Always provide a clear, descriptive commit message.",
+        "strict": true,
+        "input_schema": closedObjectSchema(
+            properties: [
+                "message": ["type": "string", "description": "The commit message."],
+                "files": [
+                    "type": "array",
+                    "description": "Files to stage before committing. If empty, stages all changes.",
+                    "items": ["type": "string", "description": "File path to stage."]
+                ],
+                "all": ["type": "boolean", "description": "If true, stage all tracked changes (-a). Defaults to false."]
+            ] as [String: Any],
+            required: ["message"]
+        )
+    ]
+
+    // MARK: - Simulator Launch App
+
+    static let simulatorLaunchApp: [String: Any] = [
+        "name": "simulator_launch_app",
+        "description": "Launch an app by bundle identifier on the iOS Simulator. Terminates any running instance first. Use this when you want to launch or relaunch an app without rebuilding.",
+        "strict": true,
+        "input_schema": closedObjectSchema(
+            properties: [
+                "bundle_id": ["type": "string", "description": "The app's bundle identifier."],
+                "device_udid": ["type": "string", "description": "Simulator device UDID. Uses selected device if omitted."]
+            ] as [String: Any],
+            required: ["bundle_id"]
         )
     ]
 }

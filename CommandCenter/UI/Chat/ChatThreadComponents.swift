@@ -2174,6 +2174,24 @@ struct StreamingAssistantMessageRow: View {
             return .webSearch
         case "web_fetch", "fetch_webpage":
             return .webFetch
+        case "screenshot_simulator", "take_screenshot", "capture_screenshot":
+            return .screenshotSimulator
+        case "xcode_build", "build", "swift_build":
+            return .xcodeBuild
+        case "xcode_test", "test", "swift_test":
+            return .xcodeTest
+        case "xcode_preview":
+            return .xcodePreview
+        case "multimodal_analyze", "analyze_image", "vision":
+            return .multimodalAnalyze
+        case "git_status":
+            return .gitStatus
+        case "git_diff":
+            return .gitDiff
+        case "git_commit":
+            return .gitCommit
+        case "simulator_launch_app":
+            return .simulatorLaunchApp
         default:
             return .terminal
         }
@@ -2181,9 +2199,11 @@ struct StreamingAssistantMessageRow: View {
 
     private func isContextTool(_ toolCall: ToolCall) -> Bool {
         switch toolCall.toolType {
-        case .fileRead, .listFiles, .webSearch, .webFetch:
+        case .fileRead, .listFiles, .webSearch, .webFetch, .gitStatus, .gitDiff,
+             .screenshotSimulator, .multimodalAnalyze:
             return true
-        case .terminal, .fileWrite, .filePatch:
+        case .terminal, .fileWrite, .filePatch, .xcodeBuild, .xcodeTest,
+             .xcodePreview, .gitCommit, .simulatorLaunchApp:
             return false
         }
     }
@@ -2210,6 +2230,29 @@ struct StreamingAssistantMessageRow: View {
             return (input?["query"] as? String) ?? "Web search"
         case .webFetch:
             return (input?["url"] as? String) ?? "Web fetch"
+        case .screenshotSimulator:
+            return "Capture simulator screenshot"
+        case .xcodeBuild:
+            return (input?["command"] as? String)
+                ?? ((input?["scheme"] as? String).map { "Build \($0)" })
+                ?? "swift build"
+        case .xcodeTest:
+            return (input?["command"] as? String)
+                ?? ((input?["filter"] as? String).map { "Test \($0)" })
+                ?? "swift test"
+        case .xcodePreview:
+            return "Build, launch & screenshot"
+        case .multimodalAnalyze:
+            return (input?["question"] as? String) ?? "Analyze image"
+        case .gitStatus:
+            return "git status"
+        case .gitDiff:
+            let staged = (input?["staged"] as? Bool) ?? false
+            return staged ? "git diff --cached" : "git diff"
+        case .gitCommit:
+            return (input?["message"] as? String).map { "Commit: \($0.prefix(50))" } ?? "git commit"
+        case .simulatorLaunchApp:
+            return (input?["bundle_id"] as? String).map { "Launch \($0)" } ?? "Launch app"
         }
     }
 

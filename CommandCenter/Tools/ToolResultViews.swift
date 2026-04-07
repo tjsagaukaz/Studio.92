@@ -161,6 +161,16 @@ struct ToolCallCard: View {
         switch toolCall.toolType {
         case .webSearch, .webFetch:
             WebToolCard(toolCall: toolCall)
+        case .screenshotSimulator, .xcodePreview:
+            ScreenshotToolCard(toolCall: toolCall)
+        case .xcodeBuild, .xcodeTest:
+            BuildToolCard(toolCall: toolCall)
+        case .gitStatus, .gitDiff, .gitCommit:
+            GitToolCard(toolCall: toolCall)
+        case .multimodalAnalyze:
+            MultimodalToolCard(toolCall: toolCall)
+        case .simulatorLaunchApp:
+            SimulatorToolCard(toolCall: toolCall)
         case .terminal, .fileRead, .fileWrite, .filePatch, .listFiles:
             ArtifactConsoleBlock(toolCall: toolCall)
         }
@@ -394,20 +404,22 @@ struct WebToolCard: View {
 
     private var title: String {
         switch toolCall.toolType {
-        case .webSearch:
-            return "Web Search"
-        case .webFetch:
-            return "Web Fetch"
-        case .terminal:
-            return "Terminal"
-        case .fileRead:
-            return "File Read"
-        case .fileWrite:
-            return "File Write"
-        case .filePatch:
-            return "File Patch"
-        case .listFiles:
-            return "List Files"
+        case .webSearch:         return "Web Search"
+        case .webFetch:          return "Web Fetch"
+        case .terminal:          return "Terminal"
+        case .fileRead:          return "File Read"
+        case .fileWrite:         return "File Write"
+        case .filePatch:         return "File Patch"
+        case .listFiles:         return "List Files"
+        case .screenshotSimulator: return "Screenshot"
+        case .xcodeBuild:        return "Build"
+        case .xcodeTest:         return "Test"
+        case .xcodePreview:      return "Preview"
+        case .multimodalAnalyze: return "Vision"
+        case .gitStatus:         return "Git Status"
+        case .gitDiff:           return "Git Diff"
+        case .gitCommit:         return "Git Commit"
+        case .simulatorLaunchApp: return "Simulator"
         }
     }
 
@@ -419,20 +431,22 @@ struct WebToolCard: View {
             return "xmark.octagon.fill"
         default:
             switch toolCall.toolType {
-            case .webSearch:
-                return "magnifyingglass"
-            case .webFetch:
-                return "globe"
-            case .terminal:
-                return "terminal"
-            case .fileRead:
-                return "doc.text.magnifyingglass"
-            case .fileWrite:
-                return "square.and.pencil"
-            case .filePatch:
-                return "square.and.pencil.circle.fill"
-            case .listFiles:
-                return "folder"
+            case .webSearch:            return "magnifyingglass"
+            case .webFetch:             return "globe"
+            case .terminal:             return "terminal"
+            case .fileRead:             return "doc.text.magnifyingglass"
+            case .fileWrite:            return "square.and.pencil"
+            case .filePatch:            return "square.and.pencil.circle.fill"
+            case .listFiles:            return "folder"
+            case .screenshotSimulator:  return "camera.viewfinder"
+            case .xcodeBuild:           return "hammer"
+            case .xcodeTest:            return "testtube.2"
+            case .xcodePreview:         return "play.rectangle"
+            case .multimodalAnalyze:    return "eye.trianglebadge.exclamationmark"
+            case .gitStatus:            return "arrow.triangle.branch"
+            case .gitDiff:              return "doc.text.magnifyingglass"
+            case .gitCommit:            return "arrow.up.doc"
+            case .simulatorLaunchApp:   return "iphone.gen3"
             }
         }
     }
@@ -498,6 +512,532 @@ struct TerminalToolCard: View {
 
     var body: some View {
         ArtifactConsoleBlock(toolCall: toolCall)
+    }
+}
+
+// MARK: - Screenshot Tool Card
+
+struct ScreenshotToolCard: View {
+
+    let toolCall: ToolCall
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: StudioSpacing.xl) {
+                Image(systemName: iconName)
+                    .font(StudioTypography.titleSmall)
+                    .foregroundStyle(iconColor)
+                    .symbolEffect(.pulse, options: .repeating, isActive: toolCall.status == .active)
+
+                VStack(alignment: .leading, spacing: StudioSpacing.xs) {
+                    Text(toolCall.toolType == .xcodePreview ? "Preview" : "Screenshot")
+                        .font(StudioTypography.captionSemibold)
+                        .foregroundStyle(StudioTextColor.secondary)
+
+                    Text(toolCall.command)
+                        .font(StudioTypography.bodyMedium)
+                        .foregroundStyle(StudioTextColor.primary)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 12)
+
+                statusBadge
+            }
+            .padding(StudioSpacing.section)
+
+            if toolCall.status == .completed, let screenshotPath = extractScreenshotPath() {
+                screenshotPreview(path: screenshotPath)
+                    .padding(.horizontal, StudioSpacing.section)
+                    .padding(.bottom, StudioSpacing.section)
+            }
+
+            if !toolCall.liveOutput.isEmpty, toolCall.status != .completed {
+                outputLines
+                    .padding(.horizontal, StudioSpacing.section)
+                    .padding(.bottom, StudioSpacing.lg)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: StudioRadius.xl, style: .continuous)
+                .fill(cardBackground)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: StudioRadius.xl, style: .continuous))
+        .shimmer(isActive: toolCall.status == .active)
+    }
+
+    @ViewBuilder
+    private func screenshotPreview(path: String) -> some View {
+        let url = URL(fileURLWithPath: path)
+        if let nsImage = NSImage(contentsOf: url) {
+            Image(nsImage: nsImage)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxHeight: 280)
+                .clipShape(RoundedRectangle(cornerRadius: StudioRadius.lg, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: StudioRadius.lg, style: .continuous)
+                        .stroke(StudioTextColor.tertiary.opacity(0.2), lineWidth: 1)
+                )
+        }
+    }
+
+    private var outputLines: some View {
+        VStack(alignment: .leading, spacing: StudioSpacing.xs) {
+            ForEach(Array(toolCall.liveOutput.suffix(5).enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(StudioTypography.dataCaption)
+                    .foregroundStyle(StudioTextColor.secondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private func extractScreenshotPath() -> String? {
+        toolCall.liveOutput.last(where: { $0.contains(".png") || $0.contains("Screenshot saved") })?
+            .components(separatedBy: ": ").last?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var iconName: String {
+        switch toolCall.status {
+        case .completed: return "checkmark.circle.fill"
+        case .failed:    return "xmark.octagon.fill"
+        default:         return "camera.viewfinder"
+        }
+    }
+
+    private var iconColor: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success
+        case .failed:    return StudioStatusColor.danger
+        case .active:    return StudioAccentColor.primary
+        default:         return StudioTextColor.secondary
+        }
+    }
+
+    @ViewBuilder
+    private var statusBadge: some View {
+        switch toolCall.status {
+        case .active:
+            Text("Capturing")
+                .font(StudioTypography.footnoteSemibold)
+                .foregroundStyle(StudioAccentColor.primary)
+        case .completed:
+            Text("Captured")
+                .font(StudioTypography.footnoteSemibold)
+                .foregroundStyle(StudioStatusColor.success)
+        case .failed:
+            Text("Failed")
+                .font(StudioTypography.footnoteSemibold)
+                .foregroundStyle(StudioStatusColor.danger)
+        default:
+            Text("Pending")
+                .font(StudioTypography.footnoteSemibold)
+                .foregroundStyle(StudioTextColor.secondary)
+        }
+    }
+
+    private var cardBackground: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success.opacity(0.06)
+        case .failed:    return StudioStatusColor.danger.opacity(0.06)
+        case .active:    return StudioSurfaceElevated.level2
+        default:         return StudioSurfaceElevated.level1
+        }
+    }
+}
+
+// MARK: - Build/Test Tool Card
+
+struct BuildToolCard: View {
+
+    let toolCall: ToolCall
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: StudioSpacing.xl) {
+                Image(systemName: iconName)
+                    .font(StudioTypography.titleSmall)
+                    .foregroundStyle(iconColor)
+                    .symbolEffect(.pulse, options: .repeating, isActive: toolCall.status == .active)
+
+                VStack(alignment: .leading, spacing: StudioSpacing.xs) {
+                    Text(toolCall.toolType == .xcodeTest ? "Test" : "Build")
+                        .font(StudioTypography.captionSemibold)
+                        .foregroundStyle(StudioTextColor.secondary)
+
+                    Text(toolCall.command)
+                        .font(StudioTypography.codeSemibold)
+                        .foregroundStyle(StudioTextColor.primary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 12)
+
+                statusBadge
+            }
+            .padding(StudioSpacing.section)
+
+            if !toolCall.liveOutput.isEmpty {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: StudioSpacing.xs) {
+                        ForEach(Array(toolCall.liveOutput.suffix(30).enumerated()), id: \.offset) { _, line in
+                            buildLine(line)
+                        }
+                    }
+                    .padding(StudioSpacing.section)
+                }
+                .frame(maxHeight: 180)
+                .background(StudioSurface.viewport)
+                .padding(.horizontal, StudioSpacing.lg)
+                .padding(.bottom, StudioSpacing.lg)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: StudioRadius.xl, style: .continuous)
+                .fill(cardBackground)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: StudioRadius.xl, style: .continuous))
+        .shimmer(isActive: toolCall.status == .active)
+    }
+
+    @ViewBuilder
+    private func buildLine(_ line: String) -> some View {
+        let lower = line.lowercased()
+        let isError = lower.contains("error") || lower.contains("fatal")
+        let isWarning = lower.contains("warning")
+        let isSuccess = lower.contains("succeeded") || lower.contains("passed") || lower.contains("build complete")
+
+        HStack(alignment: .top, spacing: StudioSpacing.lg) {
+            Circle()
+                .fill(isError ? StudioStatusColor.danger : isWarning ? StudioStatusColor.warning : isSuccess ? StudioStatusColor.success : StudioTextColor.tertiary)
+                .frame(width: 6, height: 6)
+                .padding(.top, 5)
+
+            Text(line)
+                .font(StudioTypography.dataCaption)
+                .foregroundStyle(isError ? StudioStatusColor.danger.opacity(0.96) : isWarning ? StudioStatusColor.warning.opacity(0.96) : StudioTextColor.primary.opacity(0.72))
+                .textSelection(.enabled)
+        }
+    }
+
+    private var iconName: String {
+        switch toolCall.status {
+        case .completed: return "checkmark.circle.fill"
+        case .failed:    return "xmark.octagon.fill"
+        case .active:    return toolCall.toolType == .xcodeTest ? "testtube.2" : "hammer.fill"
+        default:         return toolCall.toolType == .xcodeTest ? "testtube.2" : "hammer"
+        }
+    }
+
+    private var iconColor: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success
+        case .failed:    return StudioStatusColor.danger
+        case .active:    return StudioAccentColor.primary
+        default:         return StudioTextColor.secondary
+        }
+    }
+
+    @ViewBuilder
+    private var statusBadge: some View {
+        let label: String = {
+            switch toolCall.status {
+            case .active:    return toolCall.toolType == .xcodeTest ? "Testing" : "Building"
+            case .completed: return toolCall.toolType == .xcodeTest ? "Passed" : "Succeeded"
+            case .failed:    return "Failed"
+            default:         return "Pending"
+            }
+        }()
+        Text(label)
+            .font(StudioTypography.footnoteSemibold)
+            .foregroundStyle(statusColor)
+    }
+
+    private var statusColor: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success
+        case .failed:    return StudioStatusColor.danger
+        case .active:    return StudioAccentColor.primary
+        default:         return StudioTextColor.secondary
+        }
+    }
+
+    private var cardBackground: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success.opacity(0.06)
+        case .failed:    return StudioStatusColor.danger.opacity(0.06)
+        case .active:    return StudioSurfaceElevated.level2
+        default:         return StudioSurfaceElevated.level1
+        }
+    }
+}
+
+// MARK: - Git Tool Card
+
+struct GitToolCard: View {
+
+    let toolCall: ToolCall
+
+    var body: some View {
+        HStack(spacing: StudioSpacing.xl) {
+            Image(systemName: iconName)
+                .font(StudioTypography.titleSmall)
+                .foregroundStyle(iconColor)
+                .symbolEffect(.pulse, options: .repeating, isActive: toolCall.status == .active)
+
+            VStack(alignment: .leading, spacing: StudioSpacing.xs) {
+                Text(title)
+                    .font(StudioTypography.captionSemibold)
+                    .foregroundStyle(StudioTextColor.secondary)
+
+                Text(toolCall.command)
+                    .font(StudioTypography.codeSemibold)
+                    .foregroundStyle(StudioTextColor.primary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+
+            Spacer(minLength: 12)
+
+            Text(statusLabel)
+                .font(StudioTypography.footnoteSemibold)
+                .foregroundStyle(statusColor)
+        }
+        .padding(StudioSpacing.section)
+        .background(
+            RoundedRectangle(cornerRadius: StudioRadius.xl, style: .continuous)
+                .fill(cardBackground)
+        )
+        .shimmer(isActive: toolCall.status == .active)
+    }
+
+    private var title: String {
+        switch toolCall.toolType {
+        case .gitStatus: return "Git Status"
+        case .gitDiff:   return "Git Diff"
+        case .gitCommit: return "Git Commit"
+        default:         return "Git"
+        }
+    }
+
+    private var iconName: String {
+        switch toolCall.status {
+        case .completed: return "checkmark.circle.fill"
+        case .failed:    return "xmark.octagon.fill"
+        default:
+            switch toolCall.toolType {
+            case .gitCommit: return "arrow.up.doc"
+            case .gitDiff:   return "doc.text.magnifyingglass"
+            default:         return "arrow.triangle.branch"
+            }
+        }
+    }
+
+    private var iconColor: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success
+        case .failed:    return StudioStatusColor.danger
+        case .active:    return StudioAccentColor.primary
+        default:         return StudioTextColor.secondary
+        }
+    }
+
+    private var statusLabel: String {
+        switch toolCall.status {
+        case .pending:   return "Pending"
+        case .active:    return "Running"
+        case .completed: return "Done"
+        case .warning:   return "Warning"
+        case .failed:    return "Failed"
+        }
+    }
+
+    private var statusColor: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success
+        case .failed:    return StudioStatusColor.danger
+        case .active:    return StudioAccentColor.primary
+        default:         return StudioTextColor.secondary
+        }
+    }
+
+    private var cardBackground: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success.opacity(0.06)
+        case .failed:    return StudioStatusColor.danger.opacity(0.06)
+        case .active:    return StudioSurfaceElevated.level2
+        default:         return StudioSurfaceElevated.level1
+        }
+    }
+}
+
+// MARK: - Multimodal Tool Card
+
+struct MultimodalToolCard: View {
+
+    let toolCall: ToolCall
+
+    var body: some View {
+        HStack(spacing: StudioSpacing.xl) {
+            Image(systemName: iconName)
+                .font(StudioTypography.titleSmall)
+                .foregroundStyle(iconColor)
+                .symbolEffect(.pulse, options: .repeating, isActive: toolCall.status == .active)
+
+            VStack(alignment: .leading, spacing: StudioSpacing.xs) {
+                Text("Vision Analysis")
+                    .font(StudioTypography.captionSemibold)
+                    .foregroundStyle(StudioTextColor.secondary)
+
+                Text(toolCall.command)
+                    .font(StudioTypography.bodyMedium)
+                    .foregroundStyle(StudioTextColor.primary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 12)
+
+            Text(statusLabel)
+                .font(StudioTypography.footnoteSemibold)
+                .foregroundStyle(statusColor)
+        }
+        .padding(StudioSpacing.section)
+        .background(
+            RoundedRectangle(cornerRadius: StudioRadius.xl, style: .continuous)
+                .fill(cardBackground)
+        )
+        .shimmer(isActive: toolCall.status == .active)
+    }
+
+    private var iconName: String {
+        switch toolCall.status {
+        case .completed: return "checkmark.circle.fill"
+        case .failed:    return "xmark.octagon.fill"
+        default:         return "eye.trianglebadge.exclamationmark"
+        }
+    }
+
+    private var iconColor: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success
+        case .failed:    return StudioStatusColor.danger
+        case .active:    return StudioAccentColor.primary
+        default:         return StudioTextColor.secondary
+        }
+    }
+
+    private var statusLabel: String {
+        switch toolCall.status {
+        case .pending:   return "Pending"
+        case .active:    return "Analyzing"
+        case .completed: return "Done"
+        case .warning:   return "Warning"
+        case .failed:    return "Failed"
+        }
+    }
+
+    private var statusColor: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success
+        case .failed:    return StudioStatusColor.danger
+        case .active:    return StudioAccentColor.primary
+        default:         return StudioTextColor.secondary
+        }
+    }
+
+    private var cardBackground: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success.opacity(0.06)
+        case .failed:    return StudioStatusColor.danger.opacity(0.06)
+        case .active:    return StudioSurfaceElevated.level2
+        default:         return StudioSurfaceElevated.level1
+        }
+    }
+}
+
+// MARK: - Simulator Launch Card
+
+struct SimulatorToolCard: View {
+
+    let toolCall: ToolCall
+
+    var body: some View {
+        HStack(spacing: StudioSpacing.xl) {
+            Image(systemName: iconName)
+                .font(StudioTypography.titleSmall)
+                .foregroundStyle(iconColor)
+                .symbolEffect(.pulse, options: .repeating, isActive: toolCall.status == .active)
+
+            VStack(alignment: .leading, spacing: StudioSpacing.xs) {
+                Text("Simulator Launch")
+                    .font(StudioTypography.captionSemibold)
+                    .foregroundStyle(StudioTextColor.secondary)
+
+                Text(toolCall.command)
+                    .font(StudioTypography.bodyMedium)
+                    .foregroundStyle(StudioTextColor.primary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 12)
+
+            Text(statusLabel)
+                .font(StudioTypography.footnoteSemibold)
+                .foregroundStyle(statusColor)
+        }
+        .padding(StudioSpacing.section)
+        .background(
+            RoundedRectangle(cornerRadius: StudioRadius.xl, style: .continuous)
+                .fill(cardBackground)
+        )
+        .shimmer(isActive: toolCall.status == .active)
+    }
+
+    private var iconName: String {
+        switch toolCall.status {
+        case .completed: return "checkmark.circle.fill"
+        case .failed:    return "xmark.octagon.fill"
+        default:         return "iphone.gen3"
+        }
+    }
+
+    private var iconColor: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success
+        case .failed:    return StudioStatusColor.danger
+        case .active:    return StudioAccentColor.primary
+        default:         return StudioTextColor.secondary
+        }
+    }
+
+    private var statusLabel: String {
+        switch toolCall.status {
+        case .pending:   return "Pending"
+        case .active:    return "Launching"
+        case .completed: return "Launched"
+        case .warning:   return "Warning"
+        case .failed:    return "Failed"
+        }
+    }
+
+    private var statusColor: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success
+        case .failed:    return StudioStatusColor.danger
+        case .active:    return StudioAccentColor.primary
+        default:         return StudioTextColor.secondary
+        }
+    }
+
+    private var cardBackground: Color {
+        switch toolCall.status {
+        case .completed: return StudioStatusColor.success.opacity(0.06)
+        case .failed:    return StudioStatusColor.danger.opacity(0.06)
+        case .active:    return StudioSurfaceElevated.level2
+        default:         return StudioSurfaceElevated.level1
+        }
     }
 }
 

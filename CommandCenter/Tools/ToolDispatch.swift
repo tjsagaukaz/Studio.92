@@ -5,6 +5,7 @@
 
 import Foundation
 import AppKit
+import ImageIO
 import AgentCouncil
 
 // MARK: - Terminal Command Policy
@@ -138,8 +139,26 @@ extension AgenticClient {
             return ToolExecutionOutcome(text: raw.0, isError: raw.1)
         case .webSearch:
             return await executeWebSearch(input)
-        case .webFetch, .screenshotSimulator, .xcodeBuild, .xcodePreview:
-            return ToolExecutionOutcome(text: "Tool not yet implemented: \(name)", isError: true)
+        case .webFetch:
+            return await executeWebFetch(input)
+        case .screenshotSimulator:
+            return await executeScreenshotSimulator(input, progress: progress)
+        case .xcodeBuild:
+            return await executeXcodeBuild(input, progress: progress)
+        case .xcodeTest:
+            return await executeXcodeTest(input, progress: progress)
+        case .xcodePreview:
+            return await executeXcodePreview(input, progress: progress)
+        case .multimodalAnalyze:
+            return await executeMultimodalAnalyze(input)
+        case .gitStatus:
+            return await executeGitStatus()
+        case .gitDiff:
+            return await executeGitDiff(input)
+        case .gitCommit:
+            return await executeGitCommit(input, progress: progress)
+        case .simulatorLaunchApp:
+            return await executeSimulatorLaunchApp(input, progress: progress)
         }
     }
 
@@ -1117,5 +1136,718 @@ extension AgenticClient {
         return "'\(escaped)'"
     }
 
+    // MARK: - Web Fetch
 
+    func executeWebFetch(_ input: [String: Any]) async -> ToolExecutionOutcome {
+        guard let urlString = (input["url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !urlString.isEmpty,
+              let url = URL(string: urlString) else {
+            return ToolExecutionOutcome(text: "Missing or invalid: url", isError: true)
+        }
+
+        do {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 30
+            request.setValue("Studio92/1.0", forHTTPHeaderField: "User-Agent")
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return ToolExecutionOutcome(text: "No HTTP response from \(urlString)", isError: true)
+            }
+            guard (200..<400).contains(http.statusCode) else {
+                return ToolExecutionOutcome(
+                    text: "HTTP \(http.statusCode) from \(urlString)",
+                    isError: true
+                )
+            }
+
+            var body = String(decoding: data, as: UTF8.self)
+            // Strip HTML tags for a rough plain-text extraction
+            body = body.replacingOccurrences(
+                of: "<[^>]+>",
+                with: "",
+                options: .regularExpression
+            )
+            body = body.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if body.count > 100_000 {
+                body = String(body.prefix(100_000)) + "\n\n[Truncated at 100K chars]"
+            }
+
+            if body.isEmpty {
+                return ToolExecutionOutcome(text: "Fetched \(urlString) but body was empty.", isError: false)
+            }
+
+            return ToolExecutionOutcome(
+                displayText: "Fetched \(urlString) (\(body.count) chars)",
+                toolResultPayload: body,
+                isError: false
+            )
+        } catch {
+            return ToolExecutionOutcome(text: "Fetch failed: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    // MARK: - Screenshot Simulator
+
+    func executeScreenshotSimulator(
+        _ input: [String: Any],
+        progress: @escaping @Sendable (ToolProgress) -> Void
+    ) async -> ToolExecutionOutcome {
+        let deviceUDID: String
+        if let udid = (input["device_udid"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !udid.isEmpty {
+            deviceUDID = udid
+        } else {
+            let selected = await SimulatorPreviewService.shared.selectedDeviceUDID
+            guard let selected, !selected.isEmpty else {
+                return ToolExecutionOutcome(
+                    text: "No simulator device selected. Provide device_udid or select a device first.",
+                    isError: true
+                )
+            }
+            deviceUDID = selected
+        }
+
+        progress(.output("Capturing simulator screenshot for device \(deviceUDID)..."))
+
+        let outputDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("studio92-screenshots", isDirectory: true)
+        try? FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+
+        let fileURL = outputDir.appendingPathComponent("\(deviceUDID)-\(UUID().uuidString).png")
+
+        let result = await Task.detached(priority: .utility) { () -> (Bool, String) in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            proc.arguments = ["simctl", "io", deviceUDID, "screenshot", "--type=png", fileURL.path]
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(decoding: data, as: UTF8.self)
+                return (proc.terminationStatus == 0, output)
+            } catch {
+                return (false, error.localizedDescription)
+            }
+        }.value
+
+        guard result.0, FileManager.default.fileExists(atPath: fileURL.path) else {
+            let detail = result.1.trimmingCharacters(in: .whitespacesAndNewlines)
+            if detail.lowercased().contains("not booted") || detail.lowercased().contains("shutdown") {
+                return ToolExecutionOutcome(
+                    text: "Simulator device is not booted. Boot the simulator first.",
+                    isError: true
+                )
+            }
+            return ToolExecutionOutcome(
+                text: "Screenshot capture failed: \(detail)",
+                isError: true
+            )
+        }
+
+        progress(.output("Screenshot saved: \(fileURL.path)"))
+
+        return ToolExecutionOutcome(
+            displayText: "Screenshot captured: \(fileURL.lastPathComponent)",
+            toolResultPayload: "Screenshot saved at: \(fileURL.path)\nDevice: \(deviceUDID)\nUse multimodal_analyze to inspect the screenshot.",
+            isError: false
+        )
+    }
+
+    // MARK: - Xcode Build
+
+    func executeXcodeBuild(
+        _ input: [String: Any],
+        progress: @escaping @Sendable (ToolProgress) -> Void
+    ) async -> ToolExecutionOutcome {
+        let scheme = (input["scheme"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let configuration = (input["configuration"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Debug"
+
+        let command: String
+        if let customCommand = (input["command"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !customCommand.isEmpty {
+            command = customCommand
+        } else if !scheme.isEmpty {
+            command = "xcodebuild -scheme \(Self.shellQuoted(scheme)) -configuration \(Self.shellQuoted(configuration)) build 2>&1"
+        } else {
+            command = "swift build 2>&1"
+        }
+
+        if let rejection = TerminalCommandPolicy.check(command) {
+            return ToolExecutionOutcome(
+                text: "Build command blocked by safety policy: \(rejection.reason)",
+                isError: true
+            )
+        }
+
+        progress(.command(command))
+        progress(.output("$ \(command)"))
+
+        await primePersistentShellToProjectRoot()
+        let execution = await collectShellExecution(
+            command: command,
+            timeoutSeconds: 120,
+            progress: progress
+        )
+
+        let report = BuildReportBuilder.build(
+            command: command,
+            output: execution.output,
+            exitStatus: execution.exitStatus
+        )
+
+        if let report {
+            let formatted = BuildReportFormatter.formattedToolResult(
+                command: command,
+                report: report,
+                rawOutput: execution.output,
+                exitStatus: execution.exitStatus,
+                didTimeout: execution.didTimeout
+            )
+            return ToolExecutionOutcome(
+                displayText: report.succeeded
+                    ? "Build succeeded (\(report.warningCount) warnings)"
+                    : "Build failed (\(report.errorCount) errors, \(report.warningCount) warnings)",
+                toolResultPayload: formatted,
+                isError: !report.succeeded
+            )
+        }
+
+        let formatted = Self.formattedShellToolResult(
+            command: command,
+            output: execution.output,
+            exitStatus: execution.exitStatus,
+            didTimeout: execution.didTimeout
+        )
+        return ToolExecutionOutcome(
+            text: formatted,
+            isError: execution.exitStatus != 0 || execution.didTimeout
+        )
+    }
+
+    // MARK: - Xcode Test
+
+    func executeXcodeTest(
+        _ input: [String: Any],
+        progress: @escaping @Sendable (ToolProgress) -> Void
+    ) async -> ToolExecutionOutcome {
+        let filter = (input["filter"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        let command: String
+        if let customCommand = (input["command"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !customCommand.isEmpty {
+            command = customCommand
+        } else if !filter.isEmpty {
+            command = "swift test --filter \(Self.shellQuoted(filter)) 2>&1"
+        } else {
+            command = "swift test 2>&1"
+        }
+
+        if let rejection = TerminalCommandPolicy.check(command) {
+            return ToolExecutionOutcome(
+                text: "Test command blocked by safety policy: \(rejection.reason)",
+                isError: true
+            )
+        }
+
+        progress(.command(command))
+        progress(.output("$ \(command)"))
+
+        await primePersistentShellToProjectRoot()
+        let execution = await collectShellExecution(
+            command: command,
+            timeoutSeconds: 120,
+            progress: progress
+        )
+
+        let report = BuildReportBuilder.build(
+            command: command,
+            output: execution.output,
+            exitStatus: execution.exitStatus
+        )
+
+        if let report {
+            let formatted = BuildReportFormatter.formattedToolResult(
+                command: command,
+                report: report,
+                rawOutput: execution.output,
+                exitStatus: execution.exitStatus,
+                didTimeout: execution.didTimeout
+            )
+            let testSummary: String
+            if report.failedTests.isEmpty {
+                testSummary = report.succeeded ? "All tests passed" : "Tests completed with build errors"
+            } else {
+                testSummary = "\(report.failedTests.count) test(s) failed"
+            }
+            return ToolExecutionOutcome(
+                displayText: testSummary,
+                toolResultPayload: formatted,
+                isError: !report.succeeded || !report.failedTests.isEmpty
+            )
+        }
+
+        let formatted = Self.formattedShellToolResult(
+            command: command,
+            output: execution.output,
+            exitStatus: execution.exitStatus,
+            didTimeout: execution.didTimeout
+        )
+        return ToolExecutionOutcome(
+            text: formatted,
+            isError: execution.exitStatus != 0 || execution.didTimeout
+        )
+    }
+
+    // MARK: - Xcode Preview (Build + Install + Launch + Screenshot)
+
+    func executeXcodePreview(
+        _ input: [String: Any],
+        progress: @escaping @Sendable (ToolProgress) -> Void
+    ) async -> ToolExecutionOutcome {
+        guard let bundleID = (input["bundle_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !bundleID.isEmpty else {
+            return ToolExecutionOutcome(text: "Missing: bundle_id", isError: true)
+        }
+
+        // Step 1: Build
+        progress(.output("[xcode_preview] Step 1/3: Building..."))
+        let buildResult = await executeXcodeBuild(input, progress: progress)
+        guard !buildResult.isError else {
+            return ToolExecutionOutcome(
+                displayText: "Preview failed: build error",
+                toolResultPayload: buildResult.displayText,
+                isError: true
+            )
+        }
+
+        // Step 2: Launch
+        progress(.output("[xcode_preview] Step 2/3: Launching app..."))
+        let launchResult = await executeSimulatorLaunchApp([
+            "bundle_id": bundleID,
+            "device_udid": (input["device_udid"] as? String) ?? ""
+        ], progress: progress)
+        guard !launchResult.isError else {
+            return ToolExecutionOutcome(
+                displayText: "Preview failed: launch error",
+                toolResultPayload: launchResult.displayText,
+                isError: true
+            )
+        }
+
+        // Brief pause for the app to render its first frame
+        try? await Task.sleep(for: .seconds(2))
+
+        // Step 3: Screenshot
+        progress(.output("[xcode_preview] Step 3/3: Capturing screenshot..."))
+        let screenshotResult = await executeScreenshotSimulator(input, progress: progress)
+
+        let summary = """
+        Build: succeeded
+        Launch: \(bundleID)
+        Screenshot: \(screenshotResult.isError ? "failed" : "captured")
+        \(screenshotResult.displayText)
+        """
+
+        return ToolExecutionOutcome(
+            displayText: screenshotResult.isError
+                ? "Preview: built and launched, screenshot failed"
+                : "Preview: built, launched, and screenshot captured",
+            toolResultPayload: summary,
+            isError: false
+        )
+    }
+
+    // MARK: - Multimodal Analyze
+
+    func executeMultimodalAnalyze(_ input: [String: Any]) async -> ToolExecutionOutcome {
+        guard let imagePath = (input["image_path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !imagePath.isEmpty else {
+            return ToolExecutionOutcome(text: "Missing: image_path", isError: true)
+        }
+        guard let question = (input["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !question.isEmpty else {
+            return ToolExecutionOutcome(text: "Missing: question", isError: true)
+        }
+
+        let url = sandbox.resolvedURL(for: imagePath)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return ToolExecutionOutcome(text: "Image not found: \(url.path)", isError: true)
+        }
+
+        guard let imageData = try? Data(contentsOf: url) else {
+            return ToolExecutionOutcome(text: "Cannot read image: \(url.path)", isError: true)
+        }
+
+        let presetRaw = (input["preset"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "quick_qa"
+        let preset = MultimodalPreset(rawValue: presetRaw) ?? .quickQA
+        let shape = MultimodalRequestShape.shape(for: preset)
+
+        // Resize image if needed
+        let processedData: Data
+        if let resized = Self.resizeImageIfNeeded(imageData, maxDimension: shape.maxImageDimension, quality: shape.compressionQuality) {
+            processedData = resized
+        } else {
+            processedData = imageData
+        }
+
+        let base64 = processedData.base64EncodedString()
+        let mediaType = url.pathExtension.lowercased() == "png" ? "image/png" : "image/jpeg"
+
+        // Build Anthropic vision request
+        let userContent: [[String: Any]] = [
+            [
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": mediaType,
+                    "data": base64
+                ]
+            ],
+            [
+                "type": "text",
+                "text": question
+            ]
+        ]
+
+        let messages: [[String: Any]] = [
+            ["role": "user", "content": userContent]
+        ]
+
+        do {
+            let stream = try await streamRequest(
+                system: "You are a visual analysis assistant. Analyze the provided image and answer the user's question precisely. Be concise and specific.",
+                messages: messages,
+                model: "claude-sonnet-4-20250514",
+                maxTokens: 2048,
+                temperature: 0.0,
+                outputEffort: nil,
+                tools: nil,
+                thinking: nil,
+                cacheControl: nil,
+                latencyRunID: nil,
+                llmCallKey: "multimodal_analyze"
+            )
+
+            var responseText = ""
+            for try await event in stream {
+                if case .textDelta(_, let text) = event {
+                    responseText += text
+                }
+            }
+
+            if responseText.isEmpty {
+                return ToolExecutionOutcome(text: "Multimodal analysis returned empty response.", isError: true)
+            }
+
+            return ToolExecutionOutcome(
+                displayText: "Image analyzed with \(preset.displayName) preset",
+                toolResultPayload: responseText,
+                isError: false
+            )
+        } catch {
+            return ToolExecutionOutcome(
+                text: "Multimodal analysis failed: \(error.localizedDescription)",
+                isError: true
+            )
+        }
+    }
+
+    static func resizeImageIfNeeded(_ data: Data, maxDimension: CGFloat, quality: Double) -> Data? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+
+        let width = CGFloat(cgImage.width)
+        let height = CGFloat(cgImage.height)
+        guard max(width, height) > maxDimension else { return nil }
+
+        let scale = maxDimension / max(width, height)
+        let newWidth = Int(width * scale)
+        let newHeight = Int(height * scale)
+
+        guard let context = CGContext(
+            data: nil,
+            width: newWidth,
+            height: newHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+
+        context.interpolationQuality = .high
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: newWidth, height: newHeight))
+
+        guard let resizedImage = context.makeImage() else { return nil }
+
+        let mutableData = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            mutableData as CFMutableData,
+            "public.jpeg" as CFString,
+            1,
+            nil
+        ) else {
+            return nil
+        }
+
+        CGImageDestinationAddImage(destination, resizedImage, [
+            kCGImageDestinationLossyCompressionQuality: quality
+        ] as CFDictionary)
+        CGImageDestinationFinalize(destination)
+
+        return mutableData as Data
+    }
+
+    // MARK: - Git Status
+
+    func executeGitStatus() async -> ToolExecutionOutcome {
+        await primePersistentShellToProjectRoot()
+        let execution = await collectShellExecution(
+            command: "git status --porcelain=v2 --branch 2>&1",
+            timeoutSeconds: 15,
+            progress: { _ in }
+        )
+
+        if execution.exitStatus != 0 {
+            return ToolExecutionOutcome(
+                text: "git status failed (exit \(execution.exitStatus)):\n\(execution.output)",
+                isError: true
+            )
+        }
+
+        // Parse porcelain v2 output
+        let lines = execution.output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var branch = ""
+        var changes: [String] = []
+        var staged = 0
+        var unstaged = 0
+        var untracked = 0
+
+        for line in lines {
+            if line.hasPrefix("# branch.head ") {
+                branch = String(line.dropFirst("# branch.head ".count))
+            } else if line.hasPrefix("1 ") || line.hasPrefix("2 ") {
+                changes.append(line)
+                let codes = line.dropFirst(2)
+                if let first = codes.first, first != "." { staged += 1 }
+                if codes.count > 1 {
+                    let second = codes[codes.index(after: codes.startIndex)]
+                    if second != "." { unstaged += 1 }
+                }
+            } else if line.hasPrefix("? ") {
+                untracked += 1
+                changes.append(line)
+            } else if line.hasPrefix("u ") {
+                changes.append(line)
+            }
+        }
+
+        let summary = """
+        Branch: \(branch)
+        Staged: \(staged)
+        Unstaged: \(unstaged)
+        Untracked: \(untracked)
+        Total changes: \(changes.count)
+
+        \(execution.output)
+        """
+
+        return ToolExecutionOutcome(
+            displayText: "Branch: \(branch) | \(staged) staged, \(unstaged) unstaged, \(untracked) untracked",
+            toolResultPayload: summary,
+            isError: false
+        )
+    }
+
+    // MARK: - Git Diff
+
+    func executeGitDiff(_ input: [String: Any]) async -> ToolExecutionOutcome {
+        let isStaged = (input["staged"] as? Bool) ?? false
+        let path = (input["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        var command = "git diff"
+        if isStaged { command += " --cached" }
+        if !path.isEmpty { command += " -- \(Self.shellQuoted(path))" }
+        command += " 2>&1"
+
+        await primePersistentShellToProjectRoot()
+        let execution = await collectShellExecution(
+            command: command,
+            timeoutSeconds: 15,
+            progress: { _ in }
+        )
+
+        if execution.exitStatus != 0 {
+            return ToolExecutionOutcome(
+                text: "git diff failed (exit \(execution.exitStatus)):\n\(execution.output)",
+                isError: true
+            )
+        }
+
+        let output = execution.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if output.isEmpty {
+            let scope = isStaged ? "staged" : "unstaged"
+            return ToolExecutionOutcome(
+                displayText: "No \(scope) changes\(path.isEmpty ? "" : " in \(path)")",
+                toolResultPayload: "No \(scope) changes.",
+                isError: false
+            )
+        }
+
+        // Truncate very large diffs
+        let truncated = output.count > 50_000
+            ? String(output.prefix(50_000)) + "\n\n[Truncated at 50K chars]"
+            : output
+
+        return ToolExecutionOutcome(
+            displayText: "Diff: \(isStaged ? "staged" : "unstaged")\(path.isEmpty ? "" : " (\(path))")",
+            toolResultPayload: truncated,
+            isError: false
+        )
+    }
+
+    // MARK: - Git Commit
+
+    func executeGitCommit(
+        _ input: [String: Any],
+        progress: @escaping @Sendable (ToolProgress) -> Void
+    ) async -> ToolExecutionOutcome {
+        guard let message = (input["message"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !message.isEmpty else {
+            return ToolExecutionOutcome(text: "Missing: message", isError: true)
+        }
+
+        let files = stringArray(from: input["files"])
+        let stageAll = (input["all"] as? Bool) ?? false
+
+        await primePersistentShellToProjectRoot()
+
+        // Stage files
+        let stageCommand: String
+        if !files.isEmpty {
+            let paths = files.map { Self.shellQuoted($0) }.joined(separator: " ")
+            stageCommand = "git add \(paths)"
+        } else if stageAll {
+            stageCommand = "git add -A"
+        } else {
+            stageCommand = "git add -A"
+        }
+
+        progress(.output("$ \(stageCommand)"))
+        let stageExec = await collectShellExecution(
+            command: stageCommand,
+            timeoutSeconds: 15,
+            progress: progress
+        )
+
+        if stageExec.exitStatus != 0 {
+            return ToolExecutionOutcome(
+                text: "git add failed (exit \(stageExec.exitStatus)):\n\(stageExec.output)",
+                isError: true
+            )
+        }
+
+        // Commit
+        let escapedMessage = message.replacingOccurrences(of: "'", with: "'\\''")
+        let commitCommand = "git commit -m '\(escapedMessage)'"
+        progress(.output("$ \(commitCommand)"))
+
+        let commitExec = await collectShellExecution(
+            command: commitCommand,
+            timeoutSeconds: 15,
+            progress: progress
+        )
+
+        if commitExec.exitStatus != 0 {
+            let output = commitExec.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if output.contains("nothing to commit") {
+                return ToolExecutionOutcome(
+                    displayText: "Nothing to commit",
+                    toolResultPayload: output,
+                    isError: false
+                )
+            }
+            return ToolExecutionOutcome(
+                text: "git commit failed (exit \(commitExec.exitStatus)):\n\(output)",
+                isError: true
+            )
+        }
+
+        return ToolExecutionOutcome(
+            displayText: "Committed: \(message.prefix(60))\(message.count > 60 ? "..." : "")",
+            toolResultPayload: commitExec.output,
+            isError: false
+        )
+    }
+
+    // MARK: - Simulator Launch App
+
+    func executeSimulatorLaunchApp(
+        _ input: [String: Any],
+        progress: @escaping @Sendable (ToolProgress) -> Void
+    ) async -> ToolExecutionOutcome {
+        guard let bundleID = (input["bundle_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !bundleID.isEmpty else {
+            return ToolExecutionOutcome(text: "Missing: bundle_id", isError: true)
+        }
+
+        let deviceUDID: String
+        if let udid = (input["device_udid"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !udid.isEmpty {
+            deviceUDID = udid
+        } else {
+            let selected = await SimulatorPreviewService.shared.selectedDeviceUDID
+            guard let selected, !selected.isEmpty else {
+                return ToolExecutionOutcome(
+                    text: "No simulator device selected. Provide device_udid or select a device first.",
+                    isError: true
+                )
+            }
+            deviceUDID = selected
+        }
+
+        progress(.output("Launching \(bundleID) on \(deviceUDID)..."))
+
+        let result = await Task.detached(priority: .userInitiated) { () -> (Bool, String) in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            proc.arguments = [
+                "simctl", "launch", "--terminate-running-process",
+                deviceUDID, bundleID
+            ]
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(decoding: data, as: UTF8.self)
+                return (proc.terminationStatus == 0, output)
+            } catch {
+                return (false, error.localizedDescription)
+            }
+        }.value
+
+        if result.0 {
+            return ToolExecutionOutcome(
+                displayText: "Launched \(bundleID)",
+                toolResultPayload: "Launched \(bundleID) on device \(deviceUDID).\n\(result.1)",
+                isError: false
+            )
+        } else {
+            return ToolExecutionOutcome(
+                text: "Failed to launch \(bundleID): \(result.1)",
+                isError: true
+            )
+        }
+    }
 }

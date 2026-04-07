@@ -98,6 +98,9 @@ struct StreamArtifact: Equatable {
         case screenshot
         case diff
         case build
+        case test
+        case gitStatus
+        case multimodal
     }
     let kind: Kind
     let path: String?
@@ -692,6 +695,79 @@ struct SemanticEventTransformer {
                 preview: previewLine ?? summarize(result)
             )
 
+        case "screenshot_simulator":
+            return ToolPresentation(
+                kind: .screenshot,
+                title: status == .completed ? "Screenshot captured" : "Capturing screenshot",
+                target: nil,
+                preview: previewLine ?? summarize(result)
+            )
+
+        case "xcode_build":
+            return ToolPresentation(
+                kind: .build,
+                title: status == .completed ? "Build completed" : "Building project",
+                target: truncate((input?["scheme"] as? String) ?? (input?["command"] as? String) ?? "swift build", limit: 88),
+                preview: previewLine ?? summarize(result)
+            )
+
+        case "xcode_test":
+            return ToolPresentation(
+                kind: .build,
+                title: status == .completed ? "Tests completed" : "Running tests",
+                target: truncate((input?["filter"] as? String) ?? (input?["command"] as? String) ?? "swift test", limit: 88),
+                preview: previewLine ?? summarize(result)
+            )
+
+        case "xcode_preview":
+            return ToolPresentation(
+                kind: .screenshot,
+                title: status == .completed ? "Preview captured" : "Building & previewing",
+                target: truncate((input?["bundle_id"] as? String) ?? "app", limit: 88),
+                preview: previewLine ?? summarize(result)
+            )
+
+        case "multimodal_analyze":
+            return ToolPresentation(
+                kind: .read,
+                title: status == .completed ? "Image analyzed" : "Analyzing image",
+                target: truncate((input?["question"] as? String) ?? "visual inspection", limit: 88),
+                preview: previewLine ?? summarize(result)
+            )
+
+        case "git_status":
+            return ToolPresentation(
+                kind: .read,
+                title: status == .completed ? "Status checked" : "Checking git status",
+                target: nil,
+                preview: previewLine ?? summarize(result)
+            )
+
+        case "git_diff":
+            let isStaged = (input?["staged"] as? Bool) ?? false
+            return ToolPresentation(
+                kind: .read,
+                title: status == .completed ? "Diff retrieved" : "Reading diff",
+                target: isStaged ? "staged changes" : ((input?["path"] as? String).map { displayPath($0) ?? $0 } ?? "working tree"),
+                preview: previewLine ?? summarize(result)
+            )
+
+        case "git_commit":
+            return ToolPresentation(
+                kind: .write,
+                title: status == .completed ? "Committed" : "Committing changes",
+                target: truncate((input?["message"] as? String) ?? "commit", limit: 88),
+                preview: previewLine ?? summarize(result)
+            )
+
+        case "simulator_launch_app":
+            return ToolPresentation(
+                kind: .terminal,
+                title: status == .completed ? "App launched" : "Launching app",
+                target: truncate((input?["bundle_id"] as? String) ?? "app", limit: 88),
+                preview: previewLine ?? summarize(result)
+            )
+
         default:
             return ToolPresentation(
                 kind: .other,
@@ -718,7 +794,13 @@ struct SemanticEventTransformer {
         case "deploy_to_testflight":        return "Deploying to TestFlight"
         case "screenshot_simulator":        return "Capturing screenshot"
         case "xcode_build":                 return "Building project"
+        case "xcode_test":                  return "Running tests"
         case "xcode_preview":               return "Launching preview"
+        case "multimodal_analyze":          return "Analyzing image"
+        case "git_status":                  return "Checking git status"
+        case "git_diff":                    return "Reading diff"
+        case "git_commit":                  return "Committing changes"
+        case "simulator_launch_app":        return "Launching app"
         default:
             return name.replacingOccurrences(of: "_", with: " ").capitalized
         }
@@ -861,7 +943,15 @@ struct SemanticEventTransformer {
         case "screenshot_simulator":
             return StreamArtifact(kind: .screenshot, path: extractPath(from: result), summary: "Screenshot captured")
         case "xcode_build":
-            return StreamArtifact(kind: .build, path: nil, summary: isError ? "Build failed" : "Build succeeded")
+            return StreamArtifact(kind: .build, path: nil, summary: "Build succeeded")
+        case "xcode_test":
+            return StreamArtifact(kind: .test, path: nil, summary: "Tests completed")
+        case "xcode_preview":
+            return StreamArtifact(kind: .screenshot, path: extractPath(from: result), summary: "Preview captured")
+        case "multimodal_analyze":
+            return StreamArtifact(kind: .multimodal, path: extractPath(from: result), summary: "Image analyzed")
+        case "git_status":
+            return StreamArtifact(kind: .gitStatus, path: nil, summary: "Repository status")
         default:
             return nil
         }
@@ -886,8 +976,12 @@ struct SemanticEventTransformer {
             if let path = toolPath(from: input, displayCommand: nil) ?? extractPath(from: result ?? "") {
                 return .file(path: path, sourceLabel: artifactSourceLabel(forToolNamed: toolName))
             }
-        case "screenshot_simulator":
+        case "screenshot_simulator", "xcode_preview":
             if let path = extractPath(from: result ?? "") {
+                return .screenshot(path: path)
+            }
+        case "multimodal_analyze":
+            if let path = input?["image_path"] as? String {
                 return .screenshot(path: path)
             }
         default:
@@ -1032,6 +1126,14 @@ struct SemanticEventTransformer {
             return "web_fetch"
         case "run_in_terminal":
             return "terminal"
+        case "take_screenshot", "capture_screenshot":
+            return "screenshot_simulator"
+        case "build", "swift_build":
+            return "xcode_build"
+        case "test", "swift_test":
+            return "xcode_test"
+        case "analyze_image", "vision":
+            return "multimodal_analyze"
         default:
             return name
         }
@@ -1577,12 +1679,12 @@ final class StreamPipelineCoordinator {
             if let path = artifact.path {
                 viewport.showFilePreview(path: path, sourceLabel: artifact.summary)
             }
-        case .screenshot:
+        case .screenshot, .multimodal:
             if let path = artifact.path {
                 viewport.imagePath = path
                 viewport.requestTransition(to: .preview, content: .artifactImage(path: path))
             }
-        case .diff, .build:
+        case .diff, .build, .test, .gitStatus:
             break
         }
     }

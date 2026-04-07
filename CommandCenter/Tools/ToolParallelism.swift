@@ -26,7 +26,13 @@ enum StudioToolName: String, Sendable, CaseIterable, Hashable {
     case deployToTestFlight    = "deploy_to_testflight"
     case screenshotSimulator   = "screenshot_simulator"
     case xcodeBuild            = "xcode_build"
+    case xcodeTest             = "xcode_test"
     case xcodePreview          = "xcode_preview"
+    case multimodalAnalyze     = "multimodal_analyze"
+    case gitStatus             = "git_status"
+    case gitDiff               = "git_diff"
+    case gitCommit             = "git_commit"
+    case simulatorLaunchApp    = "simulator_launch_app"
 
     /// Resolve aliases produced by different LLM providers into canonical names.
     init?(normalizing raw: String) {
@@ -42,12 +48,19 @@ enum StudioToolName: String, Sendable, CaseIterable, Hashable {
              "grep_search", "semantic_search":          self = .listFiles
         case "fetch_webpage":                           self = .webFetch
         case "run_in_terminal":                         self = .terminal
+        case "take_screenshot", "capture_screenshot":   self = .screenshotSimulator
+        case "build", "swift_build":                    self = .xcodeBuild
+        case "test", "swift_test":                      self = .xcodeTest
+        case "analyze_image", "vision":                 self = .multimodalAnalyze
         default:                                        return nil
         }
     }
 
     /// Read-only, side-effect-free tools safe for concurrent execution.
-    static let parallelizable: Set<StudioToolName> = [.fileRead, .listFiles, .webSearch, .webFetch]
+    static let parallelizable: Set<StudioToolName> = [
+        .fileRead, .listFiles, .webSearch, .webFetch,
+        .screenshotSimulator, .gitStatus, .gitDiff, .multimodalAnalyze
+    ]
 
     /// Tools that operate on a file path (extractable from input JSON).
     static let filePathTools: Set<StudioToolName> = [.fileRead, .fileWrite, .filePatch]
