@@ -43,9 +43,17 @@ actor StatefulTerminalEngine {
     private var stdoutDecoder = UTF8PipeDecoder()
     private var stderrDecoder = UTF8PipeDecoder()
     private var activeCommand: ActiveCommand?
+    private var commandTimeoutTask: Task<Void, Never>?
     private var queuedWaiters: [CheckedContinuation<Void, Never>] = []
     private var lastCompletedExitStatus: Int?
     private var isShuttingDown = false
+
+    /// Maximum wall-clock time a single command may run before forced termination.
+    private let commandTimeoutSeconds: Int = 120
+
+    /// Safety cap for partial-line buffers. A single line exceeding this
+    /// (e.g. binary output, \r-only progress bars) is drained to prevent OOM.
+    private let maxLineBufferSize = 512_000 // 512KB
 
     func bootstrap() async {
         _ = try? ensureShellProcess()
@@ -76,10 +84,12 @@ actor StatefulTerminalEngine {
             continuation: stream.continuation
         )
         lastCompletedExitStatus = nil
+        startCommandWatchdog()
 
         do {
             try writeToShell(Self.commandEnvelope(for: command, delimiter: delimiter))
         } catch {
+            cancelCommandWatchdog()
             stream.continuation.yield("[ERROR] \(error.localizedDescription)")
             stream.continuation.finish()
             activeCommand = nil
@@ -237,9 +247,15 @@ actor StatefulTerminalEngine {
         switch source {
         case .stdout:
             stdoutBuffer.append(chunk)
+            if stdoutBuffer.utf8.count > maxLineBufferSize {
+                stdoutBuffer.removeAll(keepingCapacity: false)
+            }
             consumeBufferedLines(from: &stdoutBuffer, source: .stdout)
         case .stderr:
             stderrBuffer.append(chunk)
+            if stderrBuffer.utf8.count > maxLineBufferSize {
+                stderrBuffer.removeAll(keepingCapacity: false)
+            }
             consumeBufferedLines(from: &stderrBuffer, source: .stderr)
         }
     }
@@ -295,6 +311,7 @@ actor StatefulTerminalEngine {
     }
 
     private func finishActiveCommand() {
+        cancelCommandWatchdog()
         activeCommand?.continuation?.finish()
         activeCommand = nil
         resumeNextWaiterIfNeeded()
@@ -307,6 +324,7 @@ actor StatefulTerminalEngine {
     }
 
     private func handleShellTermination(status: Int32) {
+        cancelCommandWatchdog()
         clearReadabilityHandlers()
         stdinHandle = nil
         stdoutHandle = nil
@@ -340,6 +358,53 @@ actor StatefulTerminalEngine {
         guard !queuedWaiters.isEmpty else { return }
         let waiter = queuedWaiters.removeFirst()
         waiter.resume()
+    }
+
+    // MARK: - Command Timeout Watchdog
+
+    private func startCommandWatchdog() {
+        cancelCommandWatchdog()
+        let seconds = commandTimeoutSeconds
+        commandTimeoutTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(seconds))
+            } catch {
+                return // Cancelled — command completed before timeout.
+            }
+            await self?.handleCommandTimeout()
+        }
+    }
+
+    private func cancelCommandWatchdog() {
+        commandTimeoutTask?.cancel()
+        commandTimeoutTask = nil
+    }
+
+    private nonisolated func handleCommandTimeout() async {
+        await handleCommandTimeoutIsolated()
+    }
+
+    private func handleCommandTimeoutIsolated() {
+        guard activeCommand != nil else { return }
+
+        yieldToActiveCommand("[ERROR] Command timed out after \(commandTimeoutSeconds) seconds.")
+        lastCompletedExitStatus = 124 // Match coreutils timeout exit code.
+
+        // Escalate: interrupt → terminate → SIGKILL.
+        if let stdinHandle {
+            try? stdinHandle.write(contentsOf: Data([0x03])) // Ctrl-C
+        }
+
+        if let process, process.isRunning {
+            process.terminate()
+            let pid = process.processIdentifier
+            Task.detached {
+                try? await Task.sleep(for: .seconds(2))
+                kill(pid, SIGKILL)
+            }
+        }
+
+        finishActiveCommand()
     }
 
     private func clearReadabilityHandlers() {

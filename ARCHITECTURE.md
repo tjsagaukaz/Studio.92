@@ -229,17 +229,20 @@ Sources/
 └── ExecutorCLI/           — Standalone CLI for executor operations
 ```
 
-**SPM/CC relationship:** CommandCenter does NOT import AgentCouncil as a dependency.
-Some types exist as shadow copies in both. This is the #1 structural debt — types will
-drift. Planned fix: import AgentCouncil as a local package dependency.
+**SPM/CC relationship:** CommandCenter imports AgentCouncil as a local SPM package
+dependency. Shared types (`ToolPermissionPolicy`, `SandboxPolicy`, `ToolError`,
+`HandoffTypes`, tracing types) live canonically in AgentCouncil. CC-specific extensions
+(e.g. `SpanKind` additions in `AgentTrace.swift`) build on the shared types.
 
 ## Test Infrastructure
 
-- **CC Tests (37):** Xcode target `CommandCenterTests` in `CommandCenter/IntegrationTests/`
+- **CC Tests (56):** Xcode target `CommandCenterTests` in `CommandCenter/IntegrationTests/`
   - `PipelineIntegrationTests` (16) — SSE streaming, chunked delivery, tool calls, cancellation
   - `CapabilityRoutingTests` (12) — Capability matching, routing decisions, cost profiles
   - `RecoveryContractTests` (4) — Retry, circuit breaker, sandbox violations
   - `TraceLogContractTests` (5) — Span lifecycle, parent-child, structured fields
+  - `AuditFixTests` (19) — UTF-8 decoder, SSE buffer caps, stream pipeline caps,
+    credential store, isStreaming decoupling, latency eviction
   - `MockSSEServer` — URLProtocol-based mock with chunked, byte-at-a-time, split-boundary modes
 - **SPM Tests (150):** 4 targets in `Tests/`
   - `AgentCouncilTests` — Guardrails (15), Recovery (31), Tracing, Handoffs

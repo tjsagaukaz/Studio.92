@@ -283,6 +283,7 @@ final class ViewportStreamModel {
         }
 
         guard ViewportTransition.find(from: phase, to: targetPhase) != nil else {
+            print("[ViewportStreamModel] Illegal transition from \(phase) to \(targetPhase) — ignored.")
             return
         }
 

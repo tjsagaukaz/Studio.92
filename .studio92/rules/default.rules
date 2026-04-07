@@ -12,3 +12,8 @@ Never run destructive shell commands (rm -rf, DROP TABLE, git reset --hard, git 
 Never modify files outside the project root unless the user explicitly grants machine-wide access in the current session.
 Never report a build as passing without running the actual build command and seeing a success exit code.
 Never deploy to TestFlight unless the user has explicitly requested distribution in the current session.
+Cap all in-memory buffers: SSE buffers at 2MB, streaming text at 512KB, line buffers at 512KB. No unbounded growth.
+Store credentials exclusively in Keychain. Never write API keys to disk as plaintext JSON.
+Protect mutable state shared across threads with explicit locking (NSLock, actors, or Sendable value types). Do not rely on implicit thread safety.
+Add timeout watchdogs to all external process invocations. Escalate: interrupt → terminate → SIGKILL.
+When using Unmanaged pointers in callback contexts (FSEvents, CoreFoundation), always balance passRetained with release.

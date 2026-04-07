@@ -94,7 +94,12 @@ final class ThreadPersistenceCoordinator {
         thread.updatedAt = Date()
         if let projectID { thread.projectID = projectID }
 
-        modelContext.saveWithLogging()
+        do {
+            try modelContext.save()
+        } catch {
+            modelContext.rollback()
+            print("[ThreadPersistenceCoordinator] Save failed, rolled back: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Load

@@ -117,6 +117,10 @@ final class CompactionCoordinator {
     @ObservationIgnored private var consecutiveFailures = 0
     @ObservationIgnored private var optimizingWatchdog: Task<Void, Never>?
 
+    deinit {
+        optimizingWatchdog?.cancel()
+    }
+
     /// Minimum seconds between compaction attempts. Doubles on each consecutive failure.
     private static let baseCooldownSeconds: TimeInterval = 30
     /// Cap the backoff at 10 minutes.

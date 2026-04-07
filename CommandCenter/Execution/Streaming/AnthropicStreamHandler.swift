@@ -159,6 +159,7 @@ extension AgenticClient {
                             eventType = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
                         } else if line.hasPrefix("data:") {
                             let payload = String(line.dropFirst(5)).trimmingCharacters(in: .init(charactersIn: " "))
+                            guard !payload.isEmpty else { return }
                             if eventData.isEmpty {
                                 eventData = payload
                             } else if eventData.count + payload.count < maxBufferSize {
@@ -220,7 +221,10 @@ extension AgenticClient {
 
     static func parseSSE(type: String, data: String) -> SSEEvent? {
         guard data != "[DONE]" else { return nil }
-        guard let json = parseJSON(data) else { return nil }
+        guard let json = parseJSON(data) else {
+            print("[AnthropicSSE] Failed to parse JSON for event type '\(type)': \(data.prefix(200))")
+            return nil
+        }
 
         switch type {
         case "message_start":
@@ -249,14 +253,17 @@ extension AgenticClient {
             let index = json["index"] as? Int ?? 0
             switch deltaType {
             case "text_delta":
-                return .textDelta(index: index, delta["text"] as? String ?? "")
+                guard let text = delta["text"] as? String else { return nil }
+                return .textDelta(index: index, text)
             case "input_json_delta":
-                let partialJSON = delta["partial_json"] as? String ?? ""
+                guard let partialJSON = delta["partial_json"] as? String else { return nil }
                 return .toolCallInputDelta(index: index, json: partialJSON)
             case "thinking_delta":
-                return .thinkingDelta(index: index, delta["thinking"] as? String ?? "")
+                guard let thinking = delta["thinking"] as? String else { return nil }
+                return .thinkingDelta(index: index, thinking)
             case "signature_delta":
-                return .thinkingSignature(index: index, delta["signature"] as? String ?? "")
+                guard let signature = delta["signature"] as? String else { return nil }
+                return .thinkingSignature(index: index, signature)
             default:
                 return nil
             }

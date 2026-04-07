@@ -87,8 +87,11 @@ actor TracePersister {
 
     /// Begin observing a TraceCollector and persisting its spans.
     func observe(_ collector: TraceCollector, sessionID: UUID? = nil) {
-        observationTask?.cancel()
+        let oldTask = observationTask
         observationTask = Task { [weak self] in
+            // Ensure the previous observation is fully cancelled before starting.
+            oldTask?.cancel()
+            await oldTask?.value
             let stream = await collector.spanStream()
             for await span in stream {
                 guard !Task.isCancelled else { break }

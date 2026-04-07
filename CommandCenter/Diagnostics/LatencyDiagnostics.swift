@@ -150,6 +150,11 @@ actor LatencyDiagnostics {
         isMainThread: Bool = Thread.isMainThread
     ) {
         if runs[runID] == nil {
+            // Evict oldest runs beyond the retention cap.
+            while runOrder.count >= Self.maxRetainedRuns {
+                let oldest = runOrder.removeFirst()
+                runs.removeValue(forKey: oldest)
+            }
             runs[runID] = RunState(
                 runID: runID,
                 goalPreview: goalPreview,

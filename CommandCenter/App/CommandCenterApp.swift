@@ -568,55 +568,29 @@ private struct SettingsModelPill: View {
 
 enum StudioCredentialStore {
 
-    private struct Payload: Codable {
-        var values: [String: String] = [:]
-    }
-
-    private static let fileName = "Credentials.json"
-
     static func cachedValue(key: String) -> String? {
-        let trimmed = loadPayload().values[key]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (trimmed?.isEmpty == false) ? trimmed : nil
+        load(key: key)
     }
 
     static func load(key: String, allowKeychainImport: Bool = true) -> String? {
-        if let cached = cachedValue(key: key) {
-            return cached
-        }
-
-        guard allowKeychainImport,
-              let imported = KeychainCredentialStore.load(key: key)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !imported.isEmpty else {
+        guard let value = KeychainCredentialStore.load(key: key)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
             return nil
         }
-
-        save(key: key, value: imported, persistToKeychain: false)
-        return imported
+        return value
     }
 
     static func save(key: String, value: String, persistToKeychain: Bool = true) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        var payload = loadPayload()
-
         if trimmed.isEmpty {
-            payload.values.removeValue(forKey: key)
+            KeychainCredentialStore.delete(key: key)
         } else {
-            payload.values[key] = trimmed
-        }
-
-        writePayload(payload)
-
-        if persistToKeychain {
-            if trimmed.isEmpty {
-                KeychainCredentialStore.delete(key: key)
-            } else {
-                KeychainCredentialStore.save(key: key, value: trimmed)
-            }
+            KeychainCredentialStore.save(key: key, value: trimmed)
         }
     }
 
     static func delete(key: String) {
-        save(key: key, value: "")
+        KeychainCredentialStore.delete(key: key)
     }
 
     static func migrateFromUserDefaultsIfNeeded() {
@@ -624,35 +598,15 @@ enum StudioCredentialStore {
         for key in ["anthropicAPIKey", "openAIAPIKey"] {
             if let existing = defaults.string(forKey: key),
                !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               cachedValue(key: key) == nil {
-                save(key: key, value: existing, persistToKeychain: true)
+               KeychainCredentialStore.load(key: key) == nil {
+                KeychainCredentialStore.save(key: key, value: existing)
                 defaults.removeObject(forKey: key)
             }
         }
-    }
 
-    private static func loadPayload() -> Payload {
-        guard let data = try? Data(contentsOf: fileURL),
-              let payload = try? JSONDecoder().decode(Payload.self, from: data) else {
-            return Payload()
-        }
-        return payload
-    }
-
-    private static func writePayload(_ payload: Payload) {
-        let directory = fileURL.deletingLastPathComponent()
-        do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(payload)
-            try data.write(to: fileURL, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
-        } catch {
-            print("[StudioCredentialStore] Write failed: \(error.localizedDescription)")
-        }
-    }
-
-    private static var fileURL: URL {
-        URL.applicationSupportDirectory.appendingPathComponent(fileName)
+        // Remove legacy plaintext JSON cache if present.
+        let legacyFile = URL.applicationSupportDirectory.appendingPathComponent("Credentials.json")
+        try? FileManager.default.removeItem(at: legacyFile)
     }
 }
 

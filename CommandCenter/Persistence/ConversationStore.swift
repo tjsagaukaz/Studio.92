@@ -834,7 +834,12 @@ final class ConversationStore: ObservableObject {
         }
 
         if turn.response.isStreaming {
-            turn.state = .streaming
+            // If the pipeline has stopped but isStreaming was never cleared,
+            // treat as finalizing rather than perpetually stuck in .streaming.
+            turn.state = isPipelineRunning ? .streaming : .finalizing
+            if !isPipelineRunning {
+                turn.response.isStreaming = false
+            }
             return turn
         }
 

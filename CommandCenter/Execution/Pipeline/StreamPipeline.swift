@@ -197,6 +197,8 @@ final class StreamPhaseController {
     @ObservationIgnored private(set) var streamStartedAt: Date?
     @ObservationIgnored private(set) var firstMeaningfulSignalAt: Date?
     @ObservationIgnored private var thinkingBuffer: String = ""
+    /// Safety cap: buffers beyond this size stop accumulating to prevent OOM.
+    @ObservationIgnored private let maxBufferSize = 512_000 // 512KB
     /// Tracks whether the current phase has been visually committed
     /// (i.e., at least one frame has rendered). Used for elision.
     @ObservationIgnored private var phaseHasRendered: Bool = false
@@ -403,6 +405,7 @@ final class StreamPhaseController {
 
     func appendNarrative(_ text: String) {
         markFirstSignal()
+        guard narrativeBuffer.utf8.count < maxBufferSize else { return }
         narrativeBuffer += text
         if case .acknowledging = phase {
             let firstSentence = extractFirstSentence(from: narrativeBuffer)
@@ -413,6 +416,7 @@ final class StreamPhaseController {
 
     func appendThinking(_ text: String) {
         markFirstSignal()
+        guard thinkingBuffer.utf8.count < maxBufferSize else { return }
         thinkingBuffer += text
         thinkingText = thinkingBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
         thinkingSummary = Self.summarizeThinking(thinkingBuffer)

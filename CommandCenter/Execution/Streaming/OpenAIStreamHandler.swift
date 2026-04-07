@@ -513,11 +513,13 @@ extension AgenticClient {
                                 let payload = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
                                 if eventData.isEmpty {
                                     eventData = payload
-                                } else {
+                                } else if eventData.count + payload.count < maxBufferSize {
                                     eventData += "\n" + payload
                                 }
                             }
                         }
+
+                        let maxBufferSize = 2_000_000 // 2MB safety cap per buffer
 
                         func consumeDecoded(_ decoded: String) {
                             for character in decoded {
@@ -526,6 +528,9 @@ extension AgenticClient {
                                     lineBuffer.removeAll(keepingCapacity: true)
                                 } else {
                                     lineBuffer.append(character)
+                                    if lineBuffer.count > maxBufferSize {
+                                        lineBuffer.removeAll(keepingCapacity: false)
+                                    }
                                 }
                             }
                         }

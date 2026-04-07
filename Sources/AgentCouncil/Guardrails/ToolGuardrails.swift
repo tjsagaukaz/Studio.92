@@ -67,10 +67,11 @@ public struct SandboxPolicy: Sendable {
         if path.contains("\0") {
             return projectRoot
         }
-        if path.hasPrefix("/") {
-            return URL(fileURLWithPath: path)
+        let normalized = path.precomposedStringWithCanonicalMapping
+        if normalized.hasPrefix("/") {
+            return URL(fileURLWithPath: normalized)
         }
-        return projectRoot.appendingPathComponent(path)
+        return projectRoot.appendingPathComponent(normalized)
     }
 
     /// Resolve symlinks defensively using realpath(3), walking up to the

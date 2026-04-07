@@ -44,14 +44,25 @@ final class CoreSceneController: NSObject, SCNSceneRendererDelegate {
     private let smokeSystem = SCNParticleSystem()
     private let sparksSystem = SCNParticleSystem()
 
-    private var currentState: CoreState = .standby
-    private var lastUpdateTime: TimeInterval?
-    private var accumulatedRotation = SCNVector3Zero
-    private var currentRotationVelocity = CoreDynamics.standby.rotationVelocity
-    private var targetRotationVelocity = CoreDynamics.standby.rotationVelocity
-    private var currentScale: CGFloat = 1.0
-    private var targetScale: CGFloat = 1.0
-    private var activeDynamics = CoreDynamics.standby
+    private struct RenderState {
+        var currentState: CoreState = .standby
+        var lastUpdateTime: TimeInterval?
+        var accumulatedRotation = SCNVector3Zero
+        var currentRotationVelocity = CoreDynamics.standby.rotationVelocity
+        var targetRotationVelocity = CoreDynamics.standby.rotationVelocity
+        var currentScale: CGFloat = 1.0
+        var targetScale: CGFloat = 1.0
+        var activeDynamics = CoreDynamics.standby
+    }
+
+    private let stateLock = NSLock()
+    private var _renderState = RenderState()
+
+    private func withStateLock<T>(_ body: (inout RenderState) -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return body(&_renderState)
+    }
 
     private static let deepBlue = StudioColorTokens.AppKit.accentPrimary
     private static let mutedPurple = StudioColorTokens.AppKit.accentMuted
@@ -71,13 +82,17 @@ final class CoreSceneController: NSObject, SCNSceneRendererDelegate {
         sceneView?.delegate = nil
         sceneView?.scene = nil
         sceneView = nil
-        lastUpdateTime = nil
+        withStateLock { $0.lastUpdateTime = nil }
     }
 
     func updateState(_ state: CoreState) {
-        guard currentState != state else { return }
+        let shouldUpdate = withStateLock { renderState -> Bool in
+            guard renderState.currentState != state else { return false }
+            renderState.currentState = state
+            return true
+        }
+        guard shouldUpdate else { return }
 
-        currentState = state
         let dynamics = dynamics(for: state)
         applyDynamics(dynamics)
     }
@@ -88,51 +103,62 @@ final class CoreSceneController: NSObject, SCNSceneRendererDelegate {
             return
         }
 
+        var state = withStateLock { renderState in renderState }
+
         let deltaTime: CGFloat
-        if let lastUpdateTime {
-            deltaTime = max(1.0 / 240.0, min(CGFloat(time - lastUpdateTime), 1.0 / 30.0))
+        if let lastTime = state.lastUpdateTime {
+            deltaTime = max(1.0 / 240.0, min(CGFloat(time - lastTime), 1.0 / 30.0))
         } else {
             deltaTime = 1.0 / 60.0
         }
-        self.lastUpdateTime = time
+        state.lastUpdateTime = time
 
         let rotationSmoothing = smoothingFactor(for: deltaTime, response: 4.5)
-        currentRotationVelocity = interpolate(currentRotationVelocity, toward: targetRotationVelocity, factor: rotationSmoothing)
+        state.currentRotationVelocity = interpolate(state.currentRotationVelocity, toward: state.targetRotationVelocity, factor: rotationSmoothing)
 
-        let rotationPulse = 1 + (activeDynamics.rotationPulseAmplitude * CGFloat(sin(time * 0.31)))
-        accumulatedRotation.x += currentRotationVelocity.x * deltaTime * rotationPulse
-        accumulatedRotation.y += currentRotationVelocity.y * deltaTime * rotationPulse
-        accumulatedRotation.z += currentRotationVelocity.z * deltaTime * rotationPulse
+        let rotationPulse = 1 + (state.activeDynamics.rotationPulseAmplitude * CGFloat(sin(time * 0.31)))
+        state.accumulatedRotation.x += state.currentRotationVelocity.x * deltaTime * rotationPulse
+        state.accumulatedRotation.y += state.currentRotationVelocity.y * deltaTime * rotationPulse
+        state.accumulatedRotation.z += state.currentRotationVelocity.z * deltaTime * rotationPulse
 
-        currentScale = interpolate(currentScale, toward: targetScale, factor: smoothingFactor(for: deltaTime, response: 5.5))
-        let scaleVector = SCNVector3(repeating: currentScale)
+        state.currentScale = interpolate(state.currentScale, toward: state.targetScale, factor: smoothingFactor(for: deltaTime, response: 5.5))
+        let scaleVector = SCNVector3(repeating: state.currentScale)
 
         var resolvedRotation = SCNVector3(
-            accumulatedRotation.x + activeDynamics.rotationOscillation.x * CGFloat(sin(time * 0.43)),
-            accumulatedRotation.y + activeDynamics.rotationOscillation.y * CGFloat(sin((time * 0.29) + 0.8)),
-            accumulatedRotation.z + activeDynamics.rotationOscillation.z * CGFloat(cos((time * 0.37) - 0.45))
+            state.accumulatedRotation.x + state.activeDynamics.rotationOscillation.x * CGFloat(sin(time * 0.43)),
+            state.accumulatedRotation.y + state.activeDynamics.rotationOscillation.y * CGFloat(sin((time * 0.29) + 0.8)),
+            state.accumulatedRotation.z + state.activeDynamics.rotationOscillation.z * CGFloat(cos((time * 0.37) - 0.45))
         )
 
-        if currentState == .error {
+        if state.currentState == .error {
             resolvedRotation.x += CGFloat(sin(time * 4.2) * 0.028)
             resolvedRotation.z += CGFloat(cos(time * 3.6) * 0.018)
+        }
+
+        withStateLock { renderState in
+            renderState.lastUpdateTime = state.lastUpdateTime
+            renderState.currentRotationVelocity = state.currentRotationVelocity
+            renderState.accumulatedRotation = state.accumulatedRotation
+            renderState.currentScale = state.currentScale
         }
 
         SCNTransaction.begin()
         SCNTransaction.animationDuration = 0
         coreNode.eulerAngles = resolvedRotation
         coreNode.scale = scaleVector
-        updateRingDrift(time: time)
-        applyEmissive(for: time, light: light)
+        updateRingDrift(time: time, dynamics: state.activeDynamics)
+        applyEmissive(for: time, light: light, state: state.currentState, dynamics: state.activeDynamics)
         camera.focusDistance = CGFloat(distance(from: cameraNode.presentation.position, to: coreNode.presentation.worldPosition))
-        camera.bloomIntensity = activeDynamics.bloomIntensity
+        camera.bloomIntensity = state.activeDynamics.bloomIntensity
         SCNTransaction.commit()
     }
 
     private func applyDynamics(_ dynamics: CoreDynamics) {
-        activeDynamics = dynamics
-        targetRotationVelocity = dynamics.rotationVelocity
-        targetScale = dynamics.targetScale
+        withStateLock { renderState in
+            renderState.activeDynamics = dynamics
+            renderState.targetRotationVelocity = dynamics.rotationVelocity
+            renderState.targetScale = dynamics.targetScale
+        }
 
         configureParticleSystems(for: dynamics)
         configureFields(for: dynamics)
@@ -302,7 +328,7 @@ final class CoreSceneController: NSObject, SCNSceneRendererDelegate {
 
     private func configureSmoke() {
         smokeSystem.loops = true
-        smokeSystem.birthRate = activeDynamics.smokeBirthRate
+        smokeSystem.birthRate = CoreDynamics.standby.smokeBirthRate
         smokeSystem.particleLifeSpan = 2.2
         smokeSystem.particleLifeSpanVariation = 0.45
         smokeSystem.particleVelocity = 0.04
@@ -388,11 +414,11 @@ final class CoreSceneController: NSObject, SCNSceneRendererDelegate {
         sparksSystem.birthRate = dynamics.sparkBirthRate
     }
 
-    private func updateRingDrift(time: TimeInterval) {
+    private func updateRingDrift(time: TimeInterval, dynamics: CoreDynamics) {
         for (index, ring) in ringNodes.enumerated() {
             let base = ringBaseAngles[index]
-            let phase = time * activeDynamics.ringOrbitSpeed * (1 + Double(index) * 0.18)
-            let wobble = activeDynamics.ringWobble
+            let phase = time * dynamics.ringOrbitSpeed * (1 + Double(index) * 0.18)
+            let wobble = dynamics.ringWobble
             let driftX = CGFloat(sin(phase) * Double(wobble) * 0.18)
             let driftY = CGFloat(cos((phase * 0.62) + Double(index) * 0.4) * Double(wobble) * 0.12)
             let driftZ = CGFloat(sin((phase * 0.88) - Double(index) * 0.3) * Double(wobble) * 0.26)
@@ -405,12 +431,12 @@ final class CoreSceneController: NSObject, SCNSceneRendererDelegate {
         }
     }
 
-    private func applyEmissive(for time: TimeInterval, light: SCNLight) {
+    private func applyEmissive(for time: TimeInterval, light: SCNLight, state: CoreState, dynamics: CoreDynamics) {
         let materialIntensity: CGFloat
         let sourceLightIntensity: CGFloat
         let emissiveColor: NSColor
 
-        switch currentState {
+        switch state {
         case .standby:
             emissiveColor = StudioColorTokens.AppKit.backgroundPrimary
             materialIntensity = 0
@@ -438,7 +464,7 @@ final class CoreSceneController: NSObject, SCNSceneRendererDelegate {
         }
 
         light.color = Self.neutralHighlight
-        light.intensity = activeDynamics.baseLightIntensity
+        light.intensity = dynamics.baseLightIntensity
         emissiveLightNode.light?.color = emissiveColor
         emissiveLightNode.light?.intensity = sourceLightIntensity
     }

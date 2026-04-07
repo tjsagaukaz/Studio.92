@@ -76,9 +76,16 @@ final class URLSessionTaskMetricsDelegate: NSObject, URLSessionTaskDelegate, @un
 final class UTF8StreamDecoder {
 
     private var buffer = Data()
+    private static let maxPendingBytes = 1_048_576 // 1MB
 
     func append(_ chunk: Data) -> String? {
         buffer.append(chunk)
+
+        if buffer.count > Self.maxPendingBytes {
+            print("[UTF8StreamDecoder] Pending buffer exceeded 1MB (\(buffer.count) bytes) without valid decode — draining.")
+            buffer.removeAll(keepingCapacity: false)
+            return nil
+        }
 
         guard let string = String(data: buffer, encoding: .utf8) else {
             return nil
@@ -91,6 +98,12 @@ final class UTF8StreamDecoder {
     /// Single-byte fast path — avoids a heap-allocated Data per byte.
     func append(_ byte: UInt8) -> String? {
         buffer.append(byte)
+
+        if buffer.count > Self.maxPendingBytes {
+            print("[UTF8StreamDecoder] Pending buffer exceeded 1MB (\(buffer.count) bytes) without valid decode — draining.")
+            buffer.removeAll(keepingCapacity: false)
+            return nil
+        }
 
         guard let string = String(data: buffer, encoding: .utf8) else {
             return nil

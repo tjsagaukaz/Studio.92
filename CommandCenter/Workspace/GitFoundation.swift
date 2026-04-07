@@ -936,6 +936,8 @@ final class PathEventMonitor {
     private let callback: Handler
     private let queue: DispatchQueue
     private var stream: FSEventStreamRef?
+    /// Tracks whether we hold a +1 retain via the FSEventStream context.
+    private var retainedSelf: Unmanaged<PathEventMonitor>?
 
     init(path: String, label: String, latency: CFTimeInterval = 0.3, callback: @escaping Handler) {
         self.path = path
@@ -948,9 +950,11 @@ final class PathEventMonitor {
         guard stream == nil else { return }
         guard FileManager.default.fileExists(atPath: path) else { return }
 
+        let retained = Unmanaged.passRetained(self)
+
         var context = FSEventStreamContext(
             version: 0,
-            info: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()),
+            info: retained.toOpaque(),
             retain: nil,
             release: nil,
             copyDescription: nil
@@ -980,6 +984,7 @@ final class PathEventMonitor {
         }
 
         self.stream = stream
+        self.retainedSelf = retained
         FSEventStreamSetDispatchQueue(stream, queue)
         FSEventStreamStart(stream)
     }
@@ -990,6 +995,9 @@ final class PathEventMonitor {
         FSEventStreamInvalidate(stream)
         FSEventStreamRelease(stream)
         self.stream = nil
+        // Balance the passRetained from start().
+        retainedSelf?.release()
+        retainedSelf = nil
     }
 
     deinit {
