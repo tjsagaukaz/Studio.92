@@ -218,7 +218,7 @@ private enum WindowStateSanitizer {
     }
 
     static func forceClamp(_ window: NSWindow) {
-        guard let screen = window.screen ?? NSScreen.main else { return }
+        guard window.screen != nil || NSScreen.main != nil else { return }
 
         // No-op — forceClamp is retired. Frame autosave and macOS window
         // management handle positioning. Manual clamping fought the window
@@ -303,6 +303,8 @@ private struct SettingsView: View {
     @State private var apiKey: String = StudioCredentialStore.cachedValue(key: "anthropicAPIKey") ?? ""
     @State private var openAIKey: String = StudioCredentialStore.cachedValue(key: "openAIAPIKey") ?? ""
     @State private var showFolderPicker = false
+    @State private var anthropicSaveTask: Task<Void, Never>?
+    @State private var openAISaveTask: Task<Void, Never>?
 
     private var resolvedModels: [StudioModelDescriptor] {
         StudioModelStrategy.descriptors(packageRoot: packageRoot)
@@ -416,10 +418,14 @@ private struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 560)
         .onChange(of: apiKey) { _, newValue in
-            StudioCredentialStore.save(key: "anthropicAPIKey", value: newValue)
+            scheduleAnthropicSave(newValue)
         }
         .onChange(of: openAIKey) { _, newValue in
-            StudioCredentialStore.save(key: "openAIAPIKey", value: newValue)
+            scheduleOpenAISave(newValue)
+        }
+        .onDisappear {
+            anthropicSaveTask?.cancel()
+            openAISaveTask?.cancel()
         }
         .fileImporter(
             isPresented: $showFolderPicker,
@@ -445,6 +451,24 @@ private struct SettingsView: View {
 
     private var openAIAccessReady: Bool {
         StudioModelStrategy.credential(provider: .openAI, storedValue: openAIKey) != nil
+    }
+
+    private func scheduleAnthropicSave(_ value: String) {
+        anthropicSaveTask?.cancel()
+        anthropicSaveTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+            StudioCredentialStore.save(key: "anthropicAPIKey", value: value)
+        }
+    }
+
+    private func scheduleOpenAISave(_ value: String) {
+        openAISaveTask?.cancel()
+        openAISaveTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+            StudioCredentialStore.save(key: "openAIAPIKey", value: value)
+        }
     }
 
     private var anthropicAccessStatus: String {
@@ -568,28 +592,46 @@ private struct SettingsModelPill: View {
 
 enum StudioCredentialStore {
 
+    private static let cacheLock = NSLock()
+    private static var cachedCredentials: [String: String?] = [:]
+
     static func cachedValue(key: String) -> String? {
         load(key: key)
     }
 
     static func load(key: String, allowKeychainImport: Bool = true) -> String? {
-        guard let value = KeychainCredentialStore.load(key: key)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty else {
-            return nil
+        let cached = cachedCredential(for: key)
+        if cached.isLoaded {
+            return cached.value
         }
-        return value
+
+        let normalized = normalizedCredential(KeychainCredentialStore.load(key: key))
+        setCachedCredential(normalized, for: key)
+        return normalized
     }
 
     static func save(key: String, value: String, persistToKeychain: Bool = true) {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            KeychainCredentialStore.delete(key: key)
-        } else {
-            KeychainCredentialStore.save(key: key, value: trimmed)
+        let trimmed = normalizedCredential(value)
+        let cached = cachedCredential(for: key)
+
+        if cached.isLoaded && cached.value == trimmed {
+            return
         }
+
+        setCachedCredential(trimmed, for: key)
+
+        guard persistToKeychain else { return }
+
+        guard let trimmed else {
+            KeychainCredentialStore.delete(key: key)
+            return
+        }
+
+        KeychainCredentialStore.save(key: key, value: trimmed)
     }
 
     static func delete(key: String) {
+        setCachedCredential(nil, for: key)
         KeychainCredentialStore.delete(key: key)
     }
 
@@ -607,6 +649,28 @@ enum StudioCredentialStore {
         // Remove legacy plaintext JSON cache if present.
         let legacyFile = URL.applicationSupportDirectory.appendingPathComponent("Credentials.json")
         try? FileManager.default.removeItem(at: legacyFile)
+    }
+
+    private static func cachedCredential(for key: String) -> (isLoaded: Bool, value: String?) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard cachedCredentials.keys.contains(key) else {
+            return (false, nil)
+        }
+        return (true, cachedCredentials[key] ?? nil)
+    }
+
+    private static func setCachedCredential(_ value: String?, for key: String) {
+        cacheLock.lock()
+        cachedCredentials[key] = value
+        cacheLock.unlock()
+    }
+
+    private static func normalizedCredential(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 }
 

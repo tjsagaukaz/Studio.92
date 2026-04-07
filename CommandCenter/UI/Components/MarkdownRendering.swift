@@ -107,10 +107,10 @@ struct MarkdownListView: View {
     var tone: MarkdownMessageContent.Tone = .body
 
     var body: some View {
-        VStack(alignment: .leading, spacing: StudioSpacing.md) {
+        VStack(alignment: .leading, spacing: StudioChatLayout.listItemSpacing) {
             ForEach(items) { item in
-                VStack(alignment: .leading, spacing: StudioSpacing.sm) {
-                    HStack(alignment: .firstTextBaseline, spacing: StudioSpacing.lg) {
+                VStack(alignment: .leading, spacing: StudioSpacing.xs) {
+                    HStack(alignment: .firstTextBaseline, spacing: StudioChatLayout.listMarkerSpacing) {
                         ListMarkerView(marker: item.marker, tone: tone)
 
                         MarkdownInlineText(text: item.text, tone: tone)
@@ -119,7 +119,7 @@ struct MarkdownListView: View {
 
                     if !item.children.isEmpty {
                         MarkdownListView(items: item.children, tone: tone)
-                            .padding(.leading, StudioSpacing.columnPad)
+                            .padding(.leading, StudioChatLayout.listIndent)
                     }
                 }
             }
@@ -134,27 +134,20 @@ private struct ListMarkerView: View {
     let marker: MarkdownListItem.Marker
     let tone: MarkdownMessageContent.Tone
 
-    private var badgeSize: CGFloat { tone == .meta ? 18 : 22 }
-
     var body: some View {
         switch marker {
         case .unordered:
-            // 4pt dot — sits on the text baseline via .firstTextBaseline on the parent HStack
             Circle()
-                .fill(StudioTextColor.tertiary.opacity(0.45))
+                .fill(StudioTextColor.tertiary.opacity(StudioChatLayout.assistantTertiaryTextOpacity))
                 .frame(width: 4, height: 4)
-                .padding(.top, 7) // nudge down to optical cap-height alignment
-                .frame(width: badgeSize, alignment: .center)
+                .padding(.top, 7)
+                .frame(width: StudioChatLayout.listMarkerWidth, alignment: .center)
 
         case .ordered(let n):
-            // .monospacedDigit() keeps multi-digit numbers width-stable so the badge never shifts
-            Text("\(n)")
-                .font(.system(size: 11, weight: .bold).monospacedDigit())
-                .foregroundStyle(Color.primary.opacity(0.80))
-                .frame(width: badgeSize, height: badgeSize)
-                .background(.ultraThinMaterial)
-                .clipShape(Circle())
-                .overlay(Circle().stroke(Color.white.opacity(0.10), lineWidth: 0.5))
+            Text("\(n).")
+                .font(.system(size: tone == .meta ? 12 : 13, weight: .medium).monospacedDigit())
+                .foregroundStyle(StudioTextColor.tertiary.opacity(0.68))
+                .frame(width: StudioChatLayout.listMarkerWidth, alignment: .leading)
         }
     }
 }
@@ -285,16 +278,18 @@ struct MarkdownMessageContent: View, Equatable {
                 switch block.kind {
                 case .heading(let level, let value):
                     MarkdownInlineText(text: value, tone: tone)
-                        .font(headingFont(for: level))
-                        .foregroundStyle(StudioTextColor.primary)
-                        .padding(.top, StudioChatLayout.headingTopSpacing)
+                        .fontOverride(headingFont(for: level))
+                        .foregroundStyleOverride(headingColor)
+                        .lineSpacingOverride(6)
+                        .padding(.top, index == 0 ? 0 : StudioChatLayout.headingTopSpacing)
                         .padding(.bottom, StudioChatLayout.headingBottomSpacing)
                 case .paragraph(let value):
                     MarkdownInlineText(text: value, tone: tone)
-                        .opacity(isLeadParagraph ? 1.0 : 0.97)
+                        .opacity(isLeadParagraph ? StudioChatLayout.assistantLeadBlockOpacity : paragraphOpacity)
                         .padding(.bottom, StudioChatLayout.paragraphSpacing)
                 case .list(let items):
                     MarkdownListView(items: items, tone: tone)
+                        .opacity(paragraphOpacity)
                         .padding(.bottom, StudioChatLayout.paragraphSpacing)
                 case .checklist(let tasks):
                     if isStreaming || isPipelineRunning {
@@ -306,6 +301,7 @@ struct MarkdownMessageContent: View, Equatable {
                     }
                 case .quote(let value):
                     InsightCard(text: value, tone: tone)
+                        .opacity(paragraphOpacity)
                         .padding(.bottom, StudioChatLayout.paragraphSpacing)
                 case .code(let language, let code, let targetHint):
                     CodeBlockCard(
@@ -320,6 +316,7 @@ struct MarkdownMessageContent: View, Equatable {
                         .padding(.bottom, StudioChatLayout.paragraphSpacing)
                 case .table(let headers, let rows):
                     MarkdownTableView(headers: headers, rows: rows, tone: tone)
+                        .opacity(paragraphOpacity)
                         .padding(.bottom, StudioChatLayout.paragraphSpacing)
                 case .thematicBreak:
                     Rectangle()
@@ -332,9 +329,28 @@ struct MarkdownMessageContent: View, Equatable {
         .textSelection(.enabled)
     }
 
+    private var paragraphOpacity: Double {
+        tone == .assistant ? StudioChatLayout.assistantBodyBlockOpacity : 1.0
+    }
+
+    private var headingColor: Color {
+        switch tone {
+        case .assistant:
+            return StudioTextColor.primary.opacity(0.98)
+        case .user:
+            return .white
+        case .meta:
+            return StudioTextColor.secondary
+        case .body:
+            return StudioTextColor.primary
+        }
+    }
+
     private func headingFont(for level: Int) -> Font {
         switch tone {
-        case .body, .assistant, .user:
+        case .assistant:
+            return .system(size: StudioChatLayout.headingFontSize, weight: .semibold, design: .default)
+        case .body, .user:
             let size: CGFloat
             let weight: Font.Weight
             switch level {
@@ -362,24 +378,52 @@ struct MarkdownInlineText: View {
 
     let text: String
     var tone: MarkdownMessageContent.Tone = .body
+    var fontOverrideValue: Font? = nil
+    var foregroundStyleOverrideValue: Color? = nil
+    var lineSpacingOverrideValue: CGFloat? = nil
+
+    init(text: String, tone: MarkdownMessageContent.Tone = .body) {
+        self.text = text
+        self.tone = tone
+    }
 
     var body: some View {
         if var attributed = Self.cachedAttributedString(text: text, tone: tone) {
             let _ = Self.refineAttributes(&attributed, tone: tone)
             Text(attributed)
-                .font(font)
+                .font(resolvedFont)
                 .tracking(StudioChatLayout.bodyLetterSpacing)
-                .foregroundStyle(foregroundStyle)
-                .lineSpacing(lineSpacing)
+                .foregroundStyle(resolvedForegroundStyle)
+                .lineSpacing(resolvedLineSpacing)
+                .tint(linkTint)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
             Text(text)
-                .font(font)
+                .font(resolvedFont)
                 .tracking(StudioChatLayout.bodyLetterSpacing)
-                .foregroundStyle(foregroundStyle)
-                .lineSpacing(lineSpacing)
+                .foregroundStyle(resolvedForegroundStyle)
+                .lineSpacing(resolvedLineSpacing)
+                .tint(linkTint)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    func fontOverride(_ font: Font) -> MarkdownInlineText {
+        var copy = self
+        copy.fontOverrideValue = font
+        return copy
+    }
+
+    func foregroundStyleOverride(_ color: Color) -> MarkdownInlineText {
+        var copy = self
+        copy.foregroundStyleOverrideValue = color
+        return copy
+    }
+
+    func lineSpacingOverride(_ spacing: CGFloat) -> MarkdownInlineText {
+        var copy = self
+        copy.lineSpacingOverrideValue = spacing
+        return copy
     }
 
     // MARK: - AttributedString Cache
@@ -424,13 +468,38 @@ struct MarkdownInlineText: View {
                         // Cool-tone icy text for inline code on canvas
                         attributed[run.range].foregroundColor = Color(hex: "#C8D0E0")
                     }
-                } else if intent.contains(.stronglyEmphasized) {
-                    attributed[run.range].font = .system(.body, weight: .bold)
+                } else if intent.contains(.stronglyEmphasized) || intent.contains(.emphasized) {
+                    let size = baseFontSize(for: tone)
+                    attributed[run.range].font = .system(size: size, weight: .semibold, design: .default)
                 }
             }
             if run.link != nil {
-                attributed[run.range].foregroundColor = StudioAccentColor.primary
+                attributed[run.range].foregroundColor = linkColor(for: tone)
             }
+        }
+    }
+
+    private static func baseFontSize(for tone: MarkdownMessageContent.Tone) -> CGFloat {
+        switch tone {
+        case .body:
+            return StudioChatLayout.bodyFontSize
+        case .assistant:
+            return StudioChatLayout.assistantFontSize
+        case .user:
+            return StudioChatLayout.userFontSize
+        case .meta:
+            return StudioChatLayout.metaFontSize
+        }
+    }
+
+    private static func linkColor(for tone: MarkdownMessageContent.Tone) -> Color {
+        switch tone {
+        case .assistant, .body:
+            return StudioTextColor.primary.opacity(StudioChatLayout.assistantLinkOpacity)
+        case .user:
+            return .white.opacity(0.9)
+        case .meta:
+            return StudioTextColor.secondary.opacity(0.86)
         }
     }
 
@@ -447,15 +516,25 @@ struct MarkdownInlineText: View {
         }
     }
 
+    private var resolvedFont: Font {
+        fontOverrideValue ?? font
+    }
+
     private var foregroundStyle: Color {
         switch tone {
-        case .body, .assistant:
-            return StudioTextColor.primary
+        case .body:
+            return StudioTextColor.primary.opacity(0.95)
+        case .assistant:
+            return StudioTextColor.primary.opacity(StudioChatLayout.assistantPrimaryTextOpacity)
         case .user:
             return .white
         case .meta:
-            return StudioTextColor.secondary
+            return StudioTextColor.secondary.opacity(StudioChatLayout.assistantSecondaryTextOpacity)
         }
+    }
+
+    private var resolvedForegroundStyle: Color {
+        foregroundStyleOverrideValue ?? foregroundStyle
     }
 
     private var lineSpacing: CGFloat {
@@ -465,6 +544,14 @@ struct MarkdownInlineText: View {
         case .meta:
             return 4
         }
+    }
+
+    private var resolvedLineSpacing: CGFloat {
+        lineSpacingOverrideValue ?? lineSpacing
+    }
+
+    private var linkTint: Color {
+        Self.linkColor(for: tone)
     }
 }
 

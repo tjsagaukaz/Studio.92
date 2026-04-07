@@ -7,7 +7,6 @@ struct ViewportPaneView: View {
     let ambientContext: AmbientEditorContextCoordinator
     let previewService: SimulatorPreviewService
     var onHide: (() -> Void)?
-    var onDiagnoseError: (() -> Void)?
     var onAuthorizeApproval: (() -> Void)?
     var onRejectApproval: (() -> Void)?
     var onExecuteRevert: ((TemporalRevertModel) -> Void)?
@@ -115,7 +114,7 @@ struct ViewportPaneView: View {
             case .diffPreview(let diffModel):
                 viewportDiffView(diffModel)
             case .errorCard(let errorModel):
-                BuildErrorCard(errorModel: errorModel, onDiagnose: onDiagnoseError)
+                BuildErrorCard(errorModel: errorModel)
             case .approvalGate(let approvalModel):
                 ApprovalGateCard(approvalModel: approvalModel, onAuthorize: onAuthorizeApproval, onReject: onRejectApproval)
             case .temporalRevert(let revertModel):
@@ -1019,7 +1018,6 @@ private struct WaitingAmberDot: View {
 private struct BuildErrorCard: View {
 
     let errorModel: ViewportBuildErrorModel
-    let onDiagnose: (() -> Void)?
 
     @State private var cardVisible = false
 
@@ -1043,8 +1041,6 @@ private struct BuildErrorCard: View {
                     .frame(height: 1)
 
                 errorCardBody
-
-                errorCardCTA
             }
             .frame(width: cardWidth)
             .frame(maxHeight: .infinity)
@@ -1144,30 +1140,6 @@ private struct BuildErrorCard: View {
                     .padding(StudioSpacing.section)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    // MARK: CTA
-
-    private var errorCardCTA: some View {
-        VStack(spacing: 0) {
-            Rectangle()
-                .fill(Color.white.opacity(0.06))
-                .frame(height: 1)
-
-            Button(action: { onDiagnose?() }) {
-                HStack(spacing: StudioSpacing.md) {
-                    Image(systemName: "stethoscope")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("Diagnose & Fix")
-                        .font(StudioTypography.bodyMedium)
-                }
-                .foregroundStyle(onDiagnose != nil ? StudioAccentColor.primary : StudioAccentColor.primary.opacity(0.4))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, StudioSpacing.xxl)
-            }
-            .buttonStyle(.plain)
-            .disabled(onDiagnose == nil)
         }
     }
 }
@@ -1424,26 +1396,7 @@ private struct ViewportIdleCanvas: View {
                     )
                 )
 
-            // Wireframe device silhouette
-            WireframeDeviceShape()
-                .stroke(
-                    LinearGradient(
-                        colors: [
-                            StudioAccentColor.primary.opacity(0.70),
-                            StudioAccentColor.primary.opacity(0.38),
-                            Color.white.opacity(0.15)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                    lineWidth: 1.0
-                )
-                .frame(width: 80, height: 136)
-                .shadow(color: StudioAccentColor.primary.opacity(glowPulse ? 0.45 : 0.18), radius: glowPulse ? 28 : 16)
-                .animation(
-                    Animation.easeInOut(duration: isIndexing ? 0.8 : 2.8).repeatForever(autoreverses: true),
-                    value: glowPulse
-                )
+            ViewportHeroPhone(glowPulse: glowPulse, isIndexing: isIndexing)
         }
         .onAppear { glowPulse = true }
         .onChange(of: isIndexing) { _, _ in
@@ -1454,6 +1407,263 @@ private struct ViewportIdleCanvas: View {
                 glowPulse = true
             }
         }
+    }
+}
+
+private struct ViewportHeroPhone: View {
+
+    let glowPulse: Bool
+    let isIndexing: Bool
+
+    private let teal = Color(hex: "#5DE6D4")
+    private let amber = Color(hex: "#F3B55F")
+    private let coral = Color(hex: "#FF7A59")
+    private let blue = Color(hex: "#6AA8FF")
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            teal.opacity(glowPulse ? 0.26 : 0.16),
+                            teal.opacity(0.07),
+                            .clear
+                        ],
+                        center: .center,
+                        startRadius: 12,
+                        endRadius: 120
+                    )
+                )
+                .frame(width: 220, height: 220)
+                .offset(x: -34, y: -6)
+                .blur(radius: glowPulse ? 6 : 12)
+
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            amber.opacity(glowPulse ? 0.28 : 0.18),
+                            coral.opacity(0.10),
+                            .clear
+                        ],
+                        center: .center,
+                        startRadius: 10,
+                        endRadius: 130
+                    )
+                )
+                .frame(width: 240, height: 240)
+                .offset(x: 42, y: 20)
+                .blur(radius: glowPulse ? 8 : 14)
+
+            RoundedRectangle(cornerRadius: 34, style: .continuous)
+                .fill(Color.white.opacity(0.04))
+                .frame(width: 166, height: 306)
+                .offset(x: 10, y: 8)
+                .blur(radius: 26)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 34, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color(hex: "#090C11"),
+                                Color(hex: "#121722"),
+                                Color(hex: "#101521")
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.22),
+                                amber.opacity(0.28),
+                                teal.opacity(0.22)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+                    .padding(2)
+
+                VStack(spacing: 0) {
+                    Capsule(style: .continuous)
+                        .fill(Color.white.opacity(0.10))
+                        .frame(width: 52, height: 6)
+                        .padding(.top, 12)
+
+                    Spacer(minLength: 0)
+
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(hex: "#132033"),
+                                    Color(hex: "#11192A")
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .overlay {
+                            ZStack {
+                                Circle()
+                                    .fill(teal.opacity(0.90))
+                                    .frame(width: 112, height: 112)
+                                    .offset(x: -26, y: 20)
+                                    .blur(radius: 10)
+
+                                Circle()
+                                    .fill(coral.opacity(0.82))
+                                    .frame(width: 86, height: 86)
+                                    .offset(x: 34, y: -6)
+                                    .blur(radius: 8)
+
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [
+                                                amber.opacity(0.90),
+                                                coral.opacity(0.80)
+                                            ],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
+                                    .frame(width: 78, height: 112)
+                                    .offset(x: 4, y: 16)
+                                    .rotationEffect(.degrees(-12))
+                                    .blur(radius: 0.5)
+
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Capsule(style: .continuous)
+                                        .fill(Color.white.opacity(0.92))
+                                        .frame(width: 46, height: 8)
+
+                                    Capsule(style: .continuous)
+                                        .fill(Color.white.opacity(0.48))
+                                        .frame(width: 72, height: 6)
+
+                                    HStack(spacing: 8) {
+                                        ForEach(0..<3, id: \.self) { index in
+                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                .fill(index == 1 ? teal.opacity(0.90) : Color.white.opacity(0.22))
+                                                .frame(width: 24, height: 34)
+                                        }
+                                    }
+                                    .padding(.top, 6)
+                                }
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                .padding(18)
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.top, 18)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Capsule(style: .continuous)
+                                .fill(amber.opacity(0.92))
+                                .frame(width: 42, height: 10)
+
+                            Capsule(style: .continuous)
+                                .fill(Color.white.opacity(0.20))
+                                .frame(width: 54, height: 10)
+                        }
+
+                        Capsule(style: .continuous)
+                            .fill(Color.white.opacity(0.16))
+                            .frame(width: 120, height: 8)
+
+                        HStack(alignment: .bottom, spacing: 8) {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(teal.opacity(0.72))
+                                .frame(width: 24, height: 42)
+
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(blue.opacity(0.70))
+                                .frame(width: 24, height: 58)
+
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(coral.opacity(0.78))
+                                .frame(width: 24, height: 34)
+
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(amber.opacity(0.84))
+                                .frame(width: 24, height: 68)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 16)
+
+                    Spacer(minLength: 0)
+
+                    Capsule(style: .continuous)
+                        .fill(Color.white.opacity(0.12))
+                        .frame(width: 56, height: 5)
+                        .padding(.bottom, 14)
+                }
+            }
+            .frame(width: 158, height: 298)
+            .rotationEffect(.degrees(-10))
+            .shadow(color: teal.opacity(glowPulse ? 0.24 : 0.10), radius: glowPulse ? 30 : 18, y: 16)
+            .shadow(color: amber.opacity(glowPulse ? 0.22 : 0.08), radius: glowPulse ? 38 : 22, y: 24)
+
+            VStack(spacing: 10) {
+                Capsule(style: .continuous)
+                    .fill(Color(hex: "#121722").opacity(0.92))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    )
+                    .overlay {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(teal)
+                                .frame(width: 7, height: 7)
+                            Text(isIndexing ? "Indexing" : "Ready")
+                                .font(StudioTypography.badgeSmallMono)
+                                .foregroundStyle(Color.white.opacity(0.82))
+                        }
+                        .padding(.horizontal, 12)
+                    }
+                    .frame(width: 92, height: 28)
+
+                Capsule(style: .continuous)
+                    .fill(Color(hex: "#121722").opacity(0.88))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    )
+                    .overlay {
+                        HStack(spacing: 8) {
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(amber)
+                                .frame(width: 20, height: 6)
+                            Text("Preview")
+                                .font(StudioTypography.badgeSmallMono)
+                                .foregroundStyle(Color.white.opacity(0.78))
+                        }
+                        .padding(.horizontal, 12)
+                    }
+                    .frame(width: 104, height: 28)
+            }
+            .offset(x: 102, y: -74)
+            .shadow(color: Color.black.opacity(0.22), radius: 20, y: 10)
+        }
+        .frame(width: 340, height: 340)
+        .scaleEffect(glowPulse ? 1.012 : 0.992)
+        .animation(
+            .easeInOut(duration: isIndexing ? 0.85 : 3.0).repeatForever(autoreverses: true),
+            value: glowPulse
+        )
     }
 }
 
@@ -1485,41 +1695,6 @@ private struct IsometricDotGrid: View {
                 }
             }
         }
-    }
-}
-
-private struct WireframeDeviceShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        let r: CGFloat = 7          // corner radius
-        let w = rect.width
-        let h = rect.height
-        let sideInset: CGFloat = 0
-
-        // Outer body
-        p.addRoundedRect(in: CGRect(x: sideInset, y: 0, width: w - sideInset * 2, height: h), cornerSize: CGSize(width: r, height: r))
-
-        // Screen inset
-        let screenPad: CGFloat = 4
-        let screenTop: CGFloat = 12
-        let screenBottom: CGFloat = 12
-        p.addRoundedRect(
-            in: CGRect(x: screenPad, y: screenTop, width: w - screenPad * 2, height: h - screenTop - screenBottom),
-            cornerSize: CGSize(width: r - 2, height: r - 2)
-        )
-
-        // Home indicator line
-        let hiW: CGFloat = 20
-        let hiY = h - 6
-        p.move(to: CGPoint(x: (w - hiW) / 2, y: hiY))
-        p.addLine(to: CGPoint(x: (w + hiW) / 2, y: hiY))
-
-        // Camera dot
-        let camCX = w / 2
-        let camR: CGFloat = 1.5
-        p.addEllipse(in: CGRect(x: camCX - camR, y: 5 - camR, width: camR * 2, height: camR * 2))
-
-        return p
     }
 }
 

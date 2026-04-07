@@ -125,6 +125,8 @@ struct ChatMessage: Identifiable, Equatable {
     var attachments: [ChatAttachment] = []
     var epochID: UUID?
     var packetID: UUID?
+    var timelinePostedOrder: Int = 0
+    var timelineFinalizedOrder: Int?
 
     // MARK: - Streaming Fields
 
@@ -158,6 +160,10 @@ struct StreamingToolCall: Identifiable, Equatable {
     var isError: Bool = false
     /// Character offset into `streamingText` at the moment this tool call started.
     var textOffset: Int = 0
+    /// Stable chronological order for this tool start within the turn.
+    var eventSequence: Int = 0
+    /// Actual start time of the tool call.
+    var startedAt: Date = Date()
 }
 
 struct ConversationHistoryTurn: Equatable, Sendable {
@@ -291,6 +297,8 @@ struct ToolTrace: Identifiable, Equatable {
     var timestamp: Date
     /// Character offset into the turn's accumulated text at the moment this trace started.
     var textOffset: Int = 0
+    /// Stable chronological order for traces synthesized from streamed tool calls.
+    var eventSequence: Int = 0
     /// Links this tool activity to a plan step for execution tracking.
     var planStepID: String?
 
@@ -335,6 +343,18 @@ struct ToolTrace: Identifiable, Equatable {
         }
     }
 
+    var isHistoricalInlineTrace: Bool {
+        if isFileLedgerTrace {
+            return true
+        }
+
+        if isConsoleTrace {
+            return status != .error
+        }
+
+        return false
+    }
+
     var supportsInlinePeek: Bool {
         switch kind {
         case .build, .terminal, .screenshot:
@@ -343,6 +363,12 @@ struct ToolTrace: Identifiable, Equatable {
             return false
         }
     }
+}
+
+struct NarrativeSegment: Identifiable, Equatable {
+    let id: String
+    var text: String
+    var sequence: Int
 }
 
 enum TurnState: String, Equatable {
@@ -400,6 +426,7 @@ struct ConversationTurn: Identifiable, Equatable {
     var userGoal: String
     var userAttachments: [ChatAttachment] = []
     var response: AssistantResponse
+    var narrativeSegments: [NarrativeSegment]
     var toolTraces: [ToolTrace]
     var state: TurnState
     var timestamp: Date
@@ -433,24 +460,33 @@ extension ConversationTurn {
         let fullText = response.renderedText
         guard !fullText.isEmpty || !toolTraces.isEmpty else { return [] }
 
-        // Sort non-console, non-delegation traces by textOffset then timestamp.
+        let isSettled = state == .completed || state == .failed || isHistorical
+
+        // Live turns keep console activity in the separate execution tracker.
+        // Settled turns preserve file mutations and terminal/build steps inline as history pills.
         let inlineTraces = toolTraces
-            .filter { !$0.isConsoleTrace && !$0.isDelegationTrace }
-            .sorted { ($0.textOffset, $0.timestamp) < ($1.textOffset, $1.timestamp) }
+            .filter {
+                if isSettled {
+                    return $0.isHistoricalInlineTrace
+                }
+                return !$0.isConsoleTrace && !$0.isDelegationTrace
+            }
+            .sorted { ($0.textOffset, $0.eventSequence, $0.timestamp) < ($1.textOffset, $1.eventSequence, $1.timestamp) }
 
         // If no traces have offset info, decide based on turn state:
-        // - Completed/historical turns: tools already ran, just show text.
+        // - Completed/historical turns: preserve important action evidence after text.
         // - Live turns: show tools so user sees activity.
         let hasOffsets = inlineTraces.contains { $0.textOffset > 0 }
         if !hasOffsets && !inlineTraces.isEmpty {
-            let isSettled = state == .completed || state == .failed || isHistorical
+            if let timelineBlocks = interleavedTimelineBlocksWithoutOffsets(from: inlineTraces) {
+                return timelineBlocks
+            }
+
             var blocks: [TurnContentBlock] = []
             if !fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 blocks.append(.text(id: "text-full", text: fullText))
             }
-            if !isSettled {
-                blocks.append(.toolActivity(id: "tools-all", traces: inlineTraces))
-            }
+            blocks.append(.toolActivity(id: "tools-all", traces: inlineTraces))
             let delegations = toolTraces.filter(\.isDelegationTrace)
             if !delegations.isEmpty && !isSettled {
                 blocks.append(.toolActivity(id: "tools-delegation", traces: delegations))
@@ -521,19 +557,43 @@ extension ConversationTurn {
             blocks.append(.text(id: "text-full", text: fullText))
         }
 
-        // For settled turns, strip tool activity blocks — only show text.
-        let isSettled = state == .completed || state == .failed || isHistorical
-        if isSettled {
-            return blocks.filter {
-                if case .toolActivity = $0 { return false }
-                return true
-            }
-        }
-
         // Append delegation traces as a final group (live turns only).
         let delegations = toolTraces.filter(\.isDelegationTrace)
         if !delegations.isEmpty {
             blocks.append(.toolActivity(id: "tools-delegation", traces: delegations))
+        }
+
+        return blocks
+    }
+
+    private func interleavedTimelineBlocksWithoutOffsets(from inlineTraces: [ToolTrace]) -> [TurnContentBlock]? {
+        let segments = narrativeSegments
+            .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .sorted { ($0.sequence, $0.id) < ($1.sequence, $1.id) }
+
+        guard !segments.isEmpty else { return nil }
+
+        var blocks: [TurnContentBlock] = []
+        var traceIndex = 0
+        var blockIndex = 0
+
+        for segment in segments {
+            while traceIndex < inlineTraces.count,
+                  inlineTraces[traceIndex].eventSequence > 0,
+                  inlineTraces[traceIndex].eventSequence < segment.sequence {
+                blocks.append(.toolActivity(id: "tools-\(blockIndex)", traces: [inlineTraces[traceIndex]]))
+                blockIndex += 1
+                traceIndex += 1
+            }
+
+            blocks.append(.text(id: "text-\(blockIndex)", text: segment.text))
+            blockIndex += 1
+        }
+
+        while traceIndex < inlineTraces.count {
+            blocks.append(.toolActivity(id: "tools-\(blockIndex)", traces: [inlineTraces[traceIndex]]))
+            blockIndex += 1
+            traceIndex += 1
         }
 
         return blocks
@@ -686,6 +746,7 @@ final class ConversationStore: ObservableObject {
             userGoal: message.text,
             userAttachments: message.attachments,
             response: AssistantResponse(),
+            narrativeSegments: [],
             toolTraces: [],
             state: .executing,
             timestamp: message.timestamp,
@@ -703,6 +764,7 @@ final class ConversationStore: ObservableObject {
             userGoal: message.goal,
             userAttachments: message.kind == .userGoal ? message.attachments : [],
             response: AssistantResponse(),
+            narrativeSegments: [],
             toolTraces: [],
             state: message.kind == .error ? .failed : .completed,
             timestamp: message.timestamp,
@@ -722,6 +784,7 @@ final class ConversationStore: ObservableObject {
             userGoal: message.goal,
             userAttachments: message.kind == .userGoal ? message.attachments : [],
             response: AssistantResponse(),
+            narrativeSegments: [],
             toolTraces: [],
             state: message.kind == .error ? .failed : .executing,
             timestamp: message.timestamp,
@@ -749,6 +812,7 @@ final class ConversationStore: ObservableObject {
 
         if shouldAbsorbNarrative(from: message.kind) {
             appendNarrative(text: message.text, detailText: message.detailText, to: &turn.response)
+            appendNarrativeSegments(from: message, to: &turn.narrativeSegments)
         }
         mergeStreamingState(from: message, into: &turn.response)
         mergeToolTraces(from: message, into: &turn)
@@ -803,7 +867,7 @@ final class ConversationStore: ObservableObject {
         }
 
         for call in message.streamingToolCalls {
-            upsert(trace(from: call, timestamp: message.timestamp), into: &turn.toolTraces)
+            upsert(trace(from: call), into: &turn.toolTraces)
         }
     }
 
@@ -868,7 +932,7 @@ final class ConversationStore: ObservableObject {
         }
     }
 
-    private static func trace(from call: StreamingToolCall, timestamp: Date) -> ToolTrace {
+    private static func trace(from call: StreamingToolCall) -> ToolTrace {
         let title = traceTitle(
             toolName: call.name,
             inputJSON: call.inputJSON,
@@ -914,9 +978,41 @@ final class ConversationStore: ObservableObject {
                 inputJSON: call.inputJSON
             )?.removed,
             liveOutput: call.liveOutput,
-            timestamp: timestamp,
-            textOffset: call.textOffset
+            timestamp: call.startedAt,
+            textOffset: call.textOffset,
+            eventSequence: call.eventSequence
         )
+    }
+
+    private static func appendNarrativeSegments(from message: ChatMessage, to segments: inout [NarrativeSegment]) {
+        let sequence = narrativeSequence(for: message)
+        guard sequence > 0 else { return }
+
+        for fragment in [message.text, message.detailText].compactMap(normalizedNarrative) {
+            guard !segments.contains(where: { $0.text == fragment }) else { continue }
+            segments.append(
+                NarrativeSegment(
+                    id: "narrative-\(sequence)-\(segments.count)",
+                    text: fragment,
+                    sequence: sequence
+                )
+            )
+        }
+    }
+
+    private static func narrativeSequence(for message: ChatMessage) -> Int {
+        if let finalizedOrder = message.timelineFinalizedOrder {
+            return finalizedOrder
+        }
+
+        let postedOrder = message.timelinePostedOrder
+        guard postedOrder > 0 else { return 0 }
+
+        if let maxToolSequence = message.streamingToolCalls.map(\.eventSequence).max(), maxToolSequence > 0 {
+            return max(maxToolSequence + 1, postedOrder)
+        }
+
+        return postedOrder
     }
 
     private static func traces(from steps: [ExecutionStep], timestamp: Date) -> [ToolTrace] {
@@ -1443,11 +1539,16 @@ final class ChatThread {
 
     @ObservationIgnored private var messageIndexByID: [UUID: Int] = [:]
     @ObservationIgnored private var pendingRebuildBoundary: RebuildBoundary = .none
+    @ObservationIgnored private var nextTimelineOrder = 0
 
     func post(_ message: ChatMessage) {
-        messages.append(message)
-        messageIndexByID[message.id] = messages.endIndex - 1
-        lastUpdatedMessageID = message.id
+        var recordedMessage = message
+        if recordedMessage.timelinePostedOrder == 0 {
+            recordedMessage.timelinePostedOrder = allocateTimelineOrder()
+        }
+        messages.append(recordedMessage)
+        messageIndexByID[recordedMessage.id] = messages.endIndex - 1
+        lastUpdatedMessageID = recordedMessage.id
         structureVersion &+= 1
     }
 
@@ -1515,6 +1616,7 @@ final class ChatThread {
         isThinking = false
         completedTurns.removeAll()
         lastUpdatedMessageID = nil
+        nextTimelineOrder = 0
         structureVersion &+= 1
     }
 
@@ -1555,9 +1657,16 @@ final class ChatThread {
 
     /// Register a new tool call on a streaming message.
     func startStreamingToolCall(messageID: UUID, call: StreamingToolCall) {
+        let eventSequence = allocateTimelineOrder()
+        let startedAt = Date()
         mutateMessage(id: messageID, marksStructureChange: false) { message in
             var tracked = call
-            tracked.textOffset = message.streamingText.count
+            tracked.textOffset = StreamingNarrativePartitioner.join(
+                stable: message.text,
+                live: message.streamingText
+            ).count
+            tracked.eventSequence = eventSequence
+            tracked.startedAt = startedAt
             message.streamingToolCalls.append(tracked)
         }
     }
@@ -1618,6 +1727,7 @@ final class ChatThread {
         finalKind: ChatMessage.Kind = .assistant,
         fallbackText: String? = nil
     ) {
+        let finalizedOrder = allocateTimelineOrder()
         mutateMessage(
             id: messageID,
             marksStructureChange: false,
@@ -1633,10 +1743,12 @@ final class ChatThread {
             message.streamingText = ""
             message.isStreaming = false
             message.kind = finalKind
+            message.timelineFinalizedOrder = finalizedOrder
         }
     }
 
     func failStreaming(messageID: UUID, errorText: String) {
+        let finalizedOrder = allocateTimelineOrder()
         mutateMessage(
             id: messageID,
             marksStructureChange: false,
@@ -1654,6 +1766,7 @@ final class ChatThread {
             }
             message.isStreaming = false
             message.kind = .error
+            message.timelineFinalizedOrder = finalizedOrder
         }
     }
 
@@ -1678,6 +1791,11 @@ final class ChatThread {
             !(message.thinkingText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true),
             !message.streamingToolCalls.isEmpty
         )
+    }
+
+    private func allocateTimelineOrder() -> Int {
+        nextTimelineOrder &+= 1
+        return nextTimelineOrder
     }
 
     func recordTurn(role: ConversationHistoryTurn.Role, text: String) {

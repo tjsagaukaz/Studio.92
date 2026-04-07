@@ -4,6 +4,13 @@
 import SwiftUI
 import AppKit
 
+private extension View {
+    func assistantReadableColumn() -> some View {
+        frame(maxWidth: StudioChatLayout.assistantReadableMaxWidth, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
+    }
+}
+
 // MARK: - Empty State Watermark
 
 struct StudioEmptyStateWatermark: View {
@@ -523,8 +530,16 @@ struct ConversationTurnRow: View {
                 // Anchor dot — only visible before any content lands (no text, no tools).
                 // Once text flows, the inline stream cursor takes over inside the text view.
                 if isActivelyWorking && responseText.isEmpty && turn.toolTraces.isEmpty {
-                    ThinkingPulse()
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if let streamPhaseController {
+                        StreamStepTracker(
+                            steps: streamPhaseController.steps,
+                            activeStepID: activeToolStepID,
+                            preludeLabel: livePreludeLabel
+                        )
+                    } else {
+                        ThinkingMessageRow(statusLabel: "Starting…")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
 
                 if turn.state == .completed, (turn.metrics != nil || turn.screenshotPath != nil) {
@@ -551,10 +566,7 @@ struct ConversationTurnRow: View {
 
                 // Triage card — collapsed failure summary with one-click recovery
                 if turn.state == .failed {
-                    TriageRecoveryCard(
-                        turn: turn,
-                        onDiagnose: { onReuseGoal("Diagnose and fix the error above.") }
-                    )
+                    TriageRecoveryCard(turn: turn)
                 }
             }
         }
@@ -582,6 +594,37 @@ struct ConversationTurnRow: View {
         .onHover { isHovering = $0 }
         .animation(StudioMotion.standardSpring, value: isHighlighted)
         .animation(StudioMotion.hoverEase, value: isHovering)
+    }
+
+    private var activeToolStepID: String? {
+        guard let streamPhaseController else { return nil }
+        if case .executing(let activeStepID) = streamPhaseController.phase {
+            return activeStepID
+        }
+        return nil
+    }
+
+    private var livePreludeLabel: String {
+        guard let streamPhaseController else { return "Starting…" }
+
+        switch streamPhaseController.phase {
+        case .acknowledging:
+            return "Starting…"
+        case .thinking:
+            return "Planning approach…"
+        case .intent:
+            return "Preparing tools…"
+        case .planning:
+            return "Reviewing plan…"
+        case .executing:
+            return "Working…"
+        case .completed:
+            return "Finishing…"
+        case .failed:
+            return "Finalizing failure…"
+        case .idle:
+            return "Starting…"
+        }
     }
 }
 
@@ -659,6 +702,7 @@ struct InterleavedTurnContentView: View {
                 .transition(.studioFadeLift)
             }
         }
+        .assistantReadableColumn()
     }
 }
 
@@ -671,9 +715,18 @@ private struct InlineToolTraceGroup: View {
 
     @State private var isExpanded = false
 
+    private var historicalTraces: [ToolTrace] {
+        sortedTraces.filter(\.isHistoricalInlineTrace)
+    }
+
+    private var showsHistoricalPills: Bool {
+        !hasLive && !historicalTraces.isEmpty && historicalTraces.count == sortedTraces.count
+    }
+
     private var sortedTraces: [ToolTrace] {
-        traces.filter { !$0.isConsoleTrace }
-            .sorted(by: { $0.timestamp < $1.timestamp })
+        traces.sorted(by: {
+            ($0.eventSequence, $0.timestamp, $0.id) < ($1.eventSequence, $1.timestamp, $1.id)
+        })
     }
 
     private var hasLive: Bool {
@@ -715,68 +768,74 @@ private struct InlineToolTraceGroup: View {
 
     var body: some View {
         if !sortedTraces.isEmpty {
-            VStack(alignment: .leading, spacing: 0) {
-                Button {
-                    withAnimation(StudioMotion.standardSpring) {
-                        isExpanded.toggle()
-                    }
-                } label: {
-                    HStack(spacing: StudioSpacing.sm) {
-                        Image(systemName: hasLive ? (hasWeb ? "globe" : "circle.fill") : (hasWeb ? "globe" : "checkmark"))
-                            .font(.system(size: hasLive && !hasWeb ? 7 : (hasWeb ? 10 : 8), weight: .semibold))
-                            .foregroundStyle(hasLive ? StudioAccentColor.primary : StudioTextColor.tertiary)
-                            .frame(width: 12)
-
-                        Text(summaryText)
-                            .font(StudioTypography.footnoteMedium)
-                            .foregroundStyle(hasLive ? StudioTextColor.secondary : StudioTextColor.tertiary)
-                            .lineLimit(1)
-
-                        if sortedTraces.count > 1 {
-                            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                                .font(StudioTypography.badge)
-                                .foregroundStyle(StudioTextColor.tertiary.opacity(0.6))
-                        }
-
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.vertical, StudioSpacing.xs)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-
-                if isExpanded && sortedTraces.count > 1 {
-                    VStack(alignment: .leading, spacing: StudioSpacing.xxsPlus) {
-                        ForEach(sortedTraces, id: \.id) { trace in
+            Group {
+                if showsHistoricalPills {
+                    HistoricalTracePillStack(traces: historicalTraces)
+                } else {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Button {
+                            withAnimation(StudioMotion.standardSpring) {
+                                isExpanded.toggle()
+                            }
+                        } label: {
                             HStack(spacing: StudioSpacing.sm) {
-                                Image(systemName: traceIcon(trace))
-                                    .font(StudioTypography.badgeMedium)
-                                    .foregroundStyle(trace.isLive ? StudioTextColor.secondary : StudioTextColor.tertiary.opacity(0.6))
+                                Image(systemName: hasLive ? (hasWeb ? "globe" : "circle.fill") : (hasWeb ? "globe" : "checkmark"))
+                                    .font(.system(size: hasLive && !hasWeb ? 7 : (hasWeb ? 10 : 8), weight: .semibold))
+                                    .foregroundStyle(hasLive ? StudioAccentColor.primary : StudioTextColor.tertiary)
                                     .frame(width: 12)
 
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(traceLabel(trace))
-                                        .font(StudioTypography.caption)
-                                        .foregroundStyle(trace.isLive ? StudioTextColor.secondary : StudioTextColor.tertiary)
-                                        .lineLimit(1)
+                                Text(summaryText)
+                                    .font(StudioTypography.footnoteMedium)
+                                    .foregroundStyle(hasLive ? StudioTextColor.secondary : StudioTextColor.tertiary)
+                                    .lineLimit(1)
 
-                                    if let desc = traceDescription(trace), !desc.isEmpty {
-                                        Text(desc)
-                                            .font(StudioTypography.badgeSmall)
-                                            .foregroundStyle(StudioTextColor.tertiary.opacity(0.6))
-                                            .lineLimit(1)
+                                if sortedTraces.count > 1 {
+                                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                                        .font(StudioTypography.badge)
+                                        .foregroundStyle(StudioTextColor.tertiary.opacity(0.6))
+                                }
+
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.vertical, StudioSpacing.xs)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        if isExpanded && sortedTraces.count > 1 {
+                            VStack(alignment: .leading, spacing: StudioSpacing.xxsPlus) {
+                                ForEach(sortedTraces, id: \.id) { trace in
+                                    HStack(spacing: StudioSpacing.sm) {
+                                        Image(systemName: traceIcon(trace))
+                                            .font(StudioTypography.badgeMedium)
+                                            .foregroundStyle(trace.isLive ? StudioTextColor.secondary : StudioTextColor.tertiary.opacity(0.6))
+                                            .frame(width: 12)
+
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(traceLabel(trace))
+                                                .font(StudioTypography.caption)
+                                                .foregroundStyle(trace.isLive ? StudioTextColor.secondary : StudioTextColor.tertiary)
+                                                .lineLimit(1)
+
+                                            if let desc = traceDescription(trace), !desc.isEmpty {
+                                                Text(desc)
+                                                    .font(StudioTypography.badgeSmall)
+                                                    .foregroundStyle(StudioTextColor.tertiary.opacity(0.6))
+                                                    .lineLimit(1)
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            .padding(.leading, 0)
+                            .padding(.top, StudioSpacing.xxs)
+                            .padding(.bottom, StudioSpacing.xs)
+                            .transition(.studioCollapse)
                         }
                     }
-                    .padding(.leading, 0)
-                    .padding(.top, StudioSpacing.xxs)
-                    .padding(.bottom, StudioSpacing.xs)
-                    .transition(.studioCollapse)
+                    .opacity(StudioChatLayout.toolTraceOpacity)
                 }
             }
-            .opacity(StudioChatLayout.toolTraceOpacity)
         }
     }
 
@@ -909,6 +968,168 @@ private struct InlineToolTraceGroup: View {
             return count == 1 ? "screenshot" : "screenshots"
         case .artifact:
             return count == 1 ? "artifact" : "artifacts"
+        }
+    }
+}
+
+private struct HistoricalTracePillStack: View {
+
+    let traces: [ToolTrace]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: StudioSpacing.sm) {
+            ForEach(traces, id: \.id) { trace in
+                HistoricalTracePill(trace: trace)
+            }
+        }
+        .padding(.top, StudioSpacing.xxs)
+        .padding(.bottom, StudioSpacing.xs)
+    }
+}
+
+private struct HistoricalTracePill: View {
+
+    let trace: ToolTrace
+
+    @Environment(\.viewportActionContext) private var viewportActions
+
+    var body: some View {
+        Group {
+            if let filePath = trace.filePath, trace.isFileLedgerTrace {
+                Button {
+                    viewportActions.showFilePreview(filePath)
+                } label: {
+                    pillContent
+                }
+                .buttonStyle(.plain)
+            } else {
+                pillContent
+            }
+        }
+    }
+
+    private var pillContent: some View {
+        HStack(spacing: StudioSpacing.md) {
+            Image(systemName: leadingSymbol)
+                .font(StudioTypography.captionSemibold)
+                .foregroundStyle(accentColor)
+
+            Text(primaryLabel)
+                .font(StudioTypography.footnote)
+                .foregroundStyle(StudioTextColor.secondary)
+                .lineLimit(1)
+
+            if let countLabel {
+                Text(countLabel)
+                    .font(StudioTypography.footnoteSemibold)
+                    .foregroundStyle(countColor)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            if trace.isFileLedgerTrace {
+                Image(systemName: "arrow.up.forward.app")
+                    .font(StudioTypography.badge)
+                    .foregroundStyle(StudioTextColor.tertiary.opacity(0.7))
+            }
+        }
+        .padding(.horizontal, StudioSpacing.xl)
+        .padding(.vertical, 7)
+        .background(backgroundShape)
+        .overlay(borderShape)
+    }
+
+    private var leadingSymbol: String {
+        switch trace.status {
+        case .success:
+            return trace.isConsoleTrace ? "terminal" : "checkmark.circle.fill"
+        case .error:
+            return trace.isConsoleTrace ? "exclamationmark.triangle.fill" : "xmark.circle.fill"
+        case .running:
+            return trace.isConsoleTrace ? "terminal" : "circle.fill"
+        }
+    }
+
+    private var primaryLabel: String {
+        if trace.isFileLedgerTrace {
+            let name = URL(fileURLWithPath: trace.filePath ?? trace.title).lastPathComponent
+            switch trace.sourceName {
+            case "file_patch":
+                return trace.status == .error ? "Patch failed for \(name)" : "Updated \(name)"
+            case "file_write":
+                return trace.status == .error ? "Write failed for \(name)" : "Wrote \(name)"
+            default:
+                return trace.status == .error ? "Read failed for \(name)" : "Read \(name)"
+            }
+        }
+
+        let cleaned = trace.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleaned.isEmpty {
+            return cleaned
+        }
+        return trace.kind == .build ? "Build step" : "Command"
+    }
+
+    private var countLabel: String? {
+        guard trace.isFileLedgerTrace else { return nil }
+        let added = trace.linesAdded ?? 0
+        let removed = trace.linesRemoved ?? 0
+        guard added > 0 || removed > 0 else { return nil }
+
+        if removed > 0 {
+            return "+\(added) -\(removed)"
+        }
+        return "+\(added)"
+    }
+
+    private var accentColor: Color {
+        switch trace.status {
+        case .success:
+            return trace.isFileLedgerTrace ? StudioColorTokens.Syntax.diffAddition : Color.white.opacity(0.72)
+        case .error:
+            return StudioStatusColor.danger
+        case .running:
+            return StudioAccentColor.primary
+        }
+    }
+
+    private var countColor: Color {
+        trace.status == .error ? StudioStatusColor.danger : StudioColorTokens.Syntax.diffAddition
+    }
+
+    private var backgroundShape: some View {
+        Capsule(style: .continuous)
+            .fill(backgroundColor)
+    }
+
+    private var borderShape: some View {
+        Capsule(style: .continuous)
+            .stroke(borderColor, lineWidth: 0.5)
+    }
+
+    private var backgroundColor: Color {
+        if trace.isFileLedgerTrace {
+            return trace.status == .error
+                ? StudioStatusColor.danger.opacity(0.10)
+                : StudioColorTokens.Syntax.diffAddition.opacity(0.08)
+        }
+        return Color(hex: "#0B0D10")
+    }
+
+    private var borderColor: Color {
+        if trace.isFileLedgerTrace {
+            return trace.status == .error
+                ? StudioStatusColor.danger.opacity(0.70)
+                : StudioColorTokens.Syntax.diffAddition.opacity(0.28)
+        }
+        switch trace.status {
+        case .success:
+            return Color.white.opacity(0.10)
+        case .error:
+            return StudioStatusColor.danger.opacity(0.72)
+        case .running:
+            return StudioAccentColor.primary.opacity(0.40)
         }
     }
 }
@@ -1117,7 +1338,7 @@ struct AssistantTextView: View, Equatable {
                 )
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .assistantReadableColumn()
     }
 }
 
@@ -1146,6 +1367,7 @@ struct StreamingMarkdownRevealView: View {
         .blur(radius: isMaterializing ? 2.5 : 0)
         .opacity(isMaterializing ? 0.55 : 1.0)
         .animation(.easeOut(duration: 0.15), value: isMaterializing)
+        .assistantReadableColumn()
         .overlay(alignment: .bottomTrailing) {
             if showsCursor {
                 StreamingCursorView()
@@ -1901,7 +2123,6 @@ struct PlanViewportIndicatorRow: View {
 struct TriageRecoveryCard: View {
 
     let turn: ConversationTurn
-    let onDiagnose: () -> Void
 
     @State private var cardVisible = false
 
@@ -1944,19 +2165,6 @@ struct TriageRecoveryCard: View {
                 }
 
                 Spacer(minLength: 0)
-
-                Button(action: onDiagnose) {
-                    Text("Diagnose & Fix")
-                        .font(StudioTypography.footnoteMedium)
-                        .foregroundStyle(.black)
-                        .padding(.horizontal, StudioSpacing.xl)
-                        .padding(.vertical, StudioSpacing.lg)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(StudioAccentColor.primary)
-                        )
-                }
-                .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, StudioSpacing.xl)
@@ -2054,34 +2262,23 @@ struct AssistantNarrativeSection: View {
     var isPartial: Bool = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: StudioSpacing.lg) {
-            // Left-border anchor — 2pt rail that groups all text belonging to this AI turn.
-            // Cyan when the turn is active/streaming; muted graphite when settled.
-            RoundedRectangle(cornerRadius: 1, style: .continuous)
-                .fill(isPipelineRunning
-                      ? StudioAccentColor.primary.opacity(0.55)
-                      : StudioTextColor.tertiary.opacity(0.18))
-                .frame(width: 2)
-                .animation(StudioMotion.softFade, value: isPipelineRunning)
+        VStack(alignment: .leading, spacing: StudioChatLayout.messageInternalSpacing) {
+            MarkdownMessageContent(
+                text: text,
+                isStreaming: false,
+                isPipelineRunning: isPipelineRunning,
+                tone: .assistant
+            )
+            .foregroundStyle(textColor)
 
-            VStack(alignment: .leading, spacing: StudioChatLayout.messageInternalSpacing) {
-                MarkdownMessageContent(
-                    text: text,
-                    isStreaming: false,
-                    isPipelineRunning: isPipelineRunning
-                )
-                    .foregroundStyle(StudioTextColor.primary)
-
-                if isPartial {
-                    Text("Partial")
-                        .font(StudioTypography.microMedium)
-                        .foregroundStyle(StudioTextColor.tertiary)
-                        .padding(.top, StudioSpacing.xxs)
-                }
+            if isPartial {
+                Text("Partial")
+                    .font(StudioTypography.microMedium)
+                    .foregroundStyle(StudioTextColor.tertiary.opacity(StudioChatLayout.assistantTertiaryTextOpacity))
+                    .padding(.top, StudioSpacing.xxs)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .assistantReadableColumn()
         .foregroundStyle(textColor)
         .padding(.vertical, StudioSpacing.xxs)
     }
@@ -2134,7 +2331,7 @@ struct StreamingAssistantMessageRow: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .assistantReadableColumn()
         .padding(.vertical, StudioSpacing.xxs)
     }
 
@@ -2321,11 +2518,11 @@ struct StreamingPlainTextView: View {
         liveText
             .font(.system(size: StudioChatLayout.bodyFontSize, weight: .regular))
             .tracking(StudioChatLayout.bodyLetterSpacing)
-            .foregroundStyle(StudioTextColor.primary)
+            .foregroundStyle(StudioTextColor.primary.opacity(StudioChatLayout.assistantPrimaryTextOpacity))
             .lineSpacing(StudioChatLayout.bodyLineSpacing)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .assistantReadableColumn()
     }
 
     /// Returns plain Text when settled, or Text + inline cyan circle when streaming.

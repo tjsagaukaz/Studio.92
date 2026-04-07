@@ -61,6 +61,7 @@ struct StreamStep: Equatable, Identifiable {
     var target: String?
     var previewText: String?
     var displayCommand: String?
+    var inputJSON: String?
     var deepLink: StreamDeepLink?
     var status: StreamStepStatus = .active
     var startedAt: Date = Date()
@@ -383,6 +384,15 @@ final class StreamPhaseController {
             steps[index].title = title
             steps[index].target = target
             steps[index].previewText = preview
+        }
+    }
+
+    func refineStep(id stepID: String, title: String, target: String?, preview: String?, inputJSON: String?) {
+        if let index = steps.firstIndex(where: { $0.id == stepID }) {
+            steps[index].title = title
+            steps[index].target = target
+            steps[index].previewText = preview
+            steps[index].inputJSON = inputJSON
         }
     }
 
@@ -982,12 +992,9 @@ struct SemanticEventTransformer {
         // Checklists (- [ ]) are always intentional plan syntax.
         if !hasChecklistSyntax && planSteps.count < 3 { return nil }
 
-        // Cap at 8 steps — strip shows 6 visible rows with an overflow hint for the rest.
-        let cappedSteps = Array(planSteps.prefix(8))
-
         return StreamPlan(
             title: planTitle,
-            steps: cappedSteps,
+            steps: planSteps,
             isFinalized: true
         )
     }
@@ -1065,6 +1072,45 @@ struct SemanticEventTransformer {
             return String(trimmed[trimmed.startIndex...dot])
         }
         return String(trimmed.prefix(77)) + "..."
+    }
+
+    static func shouldPromoteNarrativePlan(for goal: String) -> Bool {
+        let normalized = goal
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        guard !normalized.isEmpty else { return false }
+
+        let explicitPlanSignals = [
+            "make a plan",
+            "create a plan",
+            "implementation plan",
+            "step-by-step plan",
+            "step by step plan",
+            "step-by-step",
+            "step by step",
+            "break this down",
+            "break it down",
+            "outline the approach",
+            "outline an approach",
+            "propose a plan",
+            "draft a plan",
+            "roadmap",
+            "milestones",
+            "plan mode",
+            "before you code",
+            "before coding"
+        ]
+
+        if explicitPlanSignals.contains(where: { normalized.contains($0) }) {
+            return true
+        }
+
+        if normalized.hasPrefix("plan ") || normalized.contains(" plan for ") {
+            return true
+        }
+
+        return false
     }
 
     private static func extractPath(from result: String) -> String? {
@@ -1362,6 +1408,7 @@ final class StreamPipelineCoordinator {
     @ObservationIgnored private var activeToolSpans: [String: UUID] = [:]
     @ObservationIgnored private var accumulatedNarrative = ""
     @ObservationIgnored private var planDetected = false
+    @ObservationIgnored private var allowsNarrativePlanPromotion = false
     /// True while the stream is inside a [PLAN]...[/PLAN] block emitted by the model.
     /// Text is suppressed from the narrative chunker until the block closes.
     @ObservationIgnored private var awaitingPlanMarkerClose = false
@@ -1397,6 +1444,7 @@ final class StreamPipelineCoordinator {
         activeToolSpans = [:]
         accumulatedNarrative = ""
         planDetected = false
+        allowsNarrativePlanPromotion = SemanticEventTransformer.shouldPromoteNarrativePlan(for: goal)
         activePlanStepID = nil
         activeTerminalToolID = nil
         activeTerminalLines = []
@@ -1475,6 +1523,7 @@ final class StreamPipelineCoordinator {
         activeToolSpans = [:]
         accumulatedNarrative = ""
         planDetected = false
+        allowsNarrativePlanPromotion = false
         awaitingPlanMarkerClose = false
         hasDeterministicPlan = false
         didDetectPlan = false
@@ -1504,12 +1553,15 @@ final class StreamPipelineCoordinator {
         if !planDetected {
             if !awaitingPlanMarkerClose && accumulatedNarrative.contains("[PLAN") {
                 awaitingPlanMarkerClose = true
+                allowsNarrativePlanPromotion = true
             }
         }
 
         // Try to detect plan in accumulated text (once).
         // Cap scan window to avoid O(n²) re-scanning on every token.
-        if !planDetected && accumulatedNarrative.count > 60 {
+        if !planDetected
+            && (allowsNarrativePlanPromotion || awaitingPlanMarkerClose)
+            && accumulatedNarrative.count > 60 {
             let scanWindow: String
             if accumulatedNarrative.count > 2000 {
                 scanWindow = String(accumulatedNarrative.suffix(2000))
@@ -1673,7 +1725,8 @@ final class StreamPipelineCoordinator {
             id: stepID,
             title: presentation.title,
             target: presentation.target,
-            preview: presentation.preview
+            preview: presentation.preview,
+            inputJSON: activeToolInputs[stepID]
         )
     }
 
@@ -1704,6 +1757,12 @@ final class StreamPipelineCoordinator {
         }
     }
 
+    /// Minimum step count for a plan to merit viewport promotion.
+    /// Plans below this threshold stay inline in the chat thread —
+    /// following the Claude Artifacts principle: only promote content
+    /// that is significant, self-contained, and worth iterating on.
+    private static let viewportPlanMinSteps = 6
+
     private func driveViewportPlan(_ plan: StreamPlan) {
         var lines: [String] = []
         for step in plan.steps {
@@ -1718,16 +1777,23 @@ final class StreamPipelineCoordinator {
             ? "\(completedCount)/\(plan.steps.count) steps done"
             : "\(plan.steps.count) steps"
         let markdown = lines.joined(separator: "\n")
-        let viewportPlan = ViewportPlanModel(
-            title: plan.title,
-            subtitle: subtitle,
-            markdown: markdown,
-            agentName: nil,
-            timestamp: Date()
-        )
-        viewportModel?.showPlanDocument(viewportPlan)
-        // Auto-open the viewport if it is currently hidden.
-        viewportModel?.onRequestReveal?()
+
+        // Only promote to the viewport for substantial plans (≥6 steps) or when
+        // the user explicitly asked for a plan. Short plans stay inline.
+        let isSubstantial = plan.steps.count >= Self.viewportPlanMinSteps
+        if isSubstantial || allowsNarrativePlanPromotion {
+            let viewportPlan = ViewportPlanModel(
+                title: plan.title,
+                subtitle: subtitle,
+                markdown: markdown,
+                agentName: nil,
+                timestamp: Date()
+            )
+            viewportModel?.showPlanDocument(viewportPlan)
+            // Auto-open the viewport if it is currently hidden.
+            viewportModel?.onRequestReveal?()
+        }
+
         // Drive inline task plan strip in the chat column — but only when no
         // deterministic plan is already driving the monitor.
         if !hasDeterministicPlan {

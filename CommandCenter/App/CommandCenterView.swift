@@ -719,6 +719,7 @@ private enum CalmChatPreviewData {
                 """,
                 thinkingText: "Prioritizing readability, hierarchy, and a stable composer placement."
             ),
+            narrativeSegments: [],
             toolTraces: [],
             state: .completed,
             timestamp: .now,
@@ -733,6 +734,7 @@ private enum CalmChatPreviewData {
                 isStreaming: true,
                 thinkingText: "Keeping the answer layer clean while the process layer stays collapsible."
             ),
+            narrativeSegments: [],
             toolTraces: [],
             state: .streaming,
             timestamp: .now,

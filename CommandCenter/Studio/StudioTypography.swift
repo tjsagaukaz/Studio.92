@@ -173,35 +173,45 @@ enum StudioSpacing {
 /// Layout constants for the calm chat column.
 /// Centralizes chat-specific measurements that build on StudioSpacing + StudioTypography.
 enum StudioChatLayout {
-    static let columnMinWidth: CGFloat = 600
+    static let columnMinWidth: CGFloat = 620
     static let columnIdealWidth: CGFloat = 680
     static let columnMaxWidth: CGFloat = 720
     static let columnHorizontalPadding: CGFloat = StudioSpacing.columnPad
     static let columnVerticalPadding: CGFloat = StudioSpacing.pagePad
     /// Space between conversation turns.
-    static let messageSpacing: CGFloat = 28
+    static let messageSpacing: CGFloat = 26
     /// Internal spacing inside assistant content.
     static let messageInternalSpacing: CGFloat = 14
     /// Space between user bubble → assistant text.
-    static let userToAssistantSpacing: CGFloat = 20
+    static let userToAssistantSpacing: CGFloat = 24
     static let bodyFontSize: CGFloat = 15
     static let assistantFontSize: CGFloat = 15
     static let userFontSize: CGFloat = 15
-    static let bodyLetterSpacing: CGFloat = -0.12
-    static let bodyLineSpacing: CGFloat = 10
+    static let bodyLetterSpacing: CGFloat = -0.16
+    static let bodyLineSpacing: CGFloat = 7
     static let headingFontSize: CGFloat = 17
     static let h1FontSize: CGFloat = 24
     static let h2FontSize: CGFloat = 20
     static let h3FontSize: CGFloat = 17
     static let h4FontSize: CGFloat = 15
     /// Top spacing above headings.
-    static let headingTopSpacing: CGFloat = 18
+    static let headingTopSpacing: CGFloat = 20
     /// Bottom spacing below headings.
-    static let headingBottomSpacing: CGFloat = 6
+    static let headingBottomSpacing: CGFloat = 8
     static let metaFontSize: CGFloat = 12
-    static let listItemSpacing: CGFloat = 7
+    static let listItemSpacing: CGFloat = 8
     /// Paragraph spacing.
     static let paragraphSpacing: CGFloat = 14
+    static let assistantReadableMaxWidth: CGFloat = 664
+    static let listMarkerSpacing: CGFloat = 14
+    static let listIndent: CGFloat = 14
+    static let listMarkerWidth: CGFloat = 14
+    static let assistantLeadBlockOpacity: Double = 1.0
+    static let assistantBodyBlockOpacity: Double = 0.965
+    static let assistantPrimaryTextOpacity: Double = 0.97
+    static let assistantSecondaryTextOpacity: Double = 0.78
+    static let assistantTertiaryTextOpacity: Double = 0.56
+    static let assistantLinkOpacity: Double = 0.88
     /// User bubble max width.
     static let userBubbleMaxWidth: CGFloat = 520
     /// User bubble corner radius.
@@ -215,7 +225,7 @@ enum StudioChatLayout {
     /// Code block corner radius.
     static let codeBlockRadius: CGFloat = 12
     /// Tool trace opacity (receded behind content).
-    static let toolTraceOpacity: Double = 0.55
+    static let toolTraceOpacity: Double = 0.5
     static let composerHeight: CGFloat = 38
     static let composerCornerRadius: CGFloat = 20
     static let composerHorizontalPadding: CGFloat = StudioSpacing.sectionGap

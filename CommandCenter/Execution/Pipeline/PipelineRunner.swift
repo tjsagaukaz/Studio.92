@@ -348,52 +348,6 @@ final class PipelineRunner {
             return
         }
 
-        // ═══════════════════════════════════════════════════════════════════
-        // To-Do Gate: when a DAG plan exists and the user has "Review Plans"
-        // enabled, pause the pipeline and present the plan for approval.
-        // ═══════════════════════════════════════════════════════════════════
-        if let taskPlan, taskPlan.steps.count > 1,
-           CommandAccessPreferenceStore.shared.planApprovalMode == .alwaysReview {
-
-            let gateSteps = taskPlan.steps.enumerated().map { index, step in
-                TodoGateStep(
-                    id: step.id,
-                    ordinal: index + 1,
-                    title: TaskPlanPromptInjection.userFacingStatus(for: step),
-                    phase: step.phase.rawValue
-                )
-            }
-            let gateRequest = TodoGateRequest(
-                goal: goal,
-                steps: gateSteps,
-                modelName: selectedModel.shortName
-            )
-
-            // Show reviewing state while gate is visible.
-            stage = .running
-            isPreparingRun = false
-            statusMessage = "Reviewing plan…"
-
-            let decision = await TodoGateController.shared.requestApproval(gateRequest)
-
-            switch decision {
-            case .approved:
-                break // Continue with execution below.
-            case .refined:
-                // User dismissed the gate to use the composer for refinement.
-                // The calling UI layer focuses the composer. Pipeline does not execute.
-                stage = .idle
-                isPreparingRun = false
-                statusMessage = ""
-                return
-            case .rejected:
-                stage = .idle
-                isPreparingRun = false
-                statusMessage = ""
-                return
-            }
-        }
-
         if selectedModel.isConfigured(
             anthropicKey: resolvedAnthropicKey,
             openAIKey: resolvedOpenAIKey

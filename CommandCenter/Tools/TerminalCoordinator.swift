@@ -244,7 +244,7 @@ actor TerminalCoordinator {
             projectRoot: projectRoot.path
         )]
 
-        for _ in 0..<8 {
+        for _ in 0..<10 {
             let response = try await createResponse(
                 input: pendingInput,
                 previousResponseID: previousResponseID
@@ -496,6 +496,9 @@ actor TerminalCoordinator {
         - Use shell commands for inspection, builds, tests, git status, and targeted verification.
         - Prefer the smallest useful sequence of commands and inspect before making conclusions.
         - Keep moving; you do not need to narrate every step.
+        - Treat a non-zero exit status as evidence to react to, not an automatic stopping point.
+        - If a command fails, inspect the output and try the next most likely corrective or diagnostic command when it is safe to do so.
+        - Only stop with a failure when the objective is genuinely blocked or repeated evidence shows the task cannot proceed safely.
         - Do not edit files through the shell. Other tools handle file changes.
         - Avoid destructive commands, including rm -rf, git reset --hard, git checkout --, sudo, or broad deletes.
         - Stop once you have enough evidence to answer the objective clearly.

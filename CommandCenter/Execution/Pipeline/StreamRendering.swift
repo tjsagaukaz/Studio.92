@@ -318,11 +318,12 @@ struct StreamStepTracker: View {
 
     let steps: [StreamStep]
     let activeStepID: String?
+    var preludeLabel: String? = nil
 
     @State private var isExpanded = false
 
     /// Maximum visible height for the scrolling feed during live execution.
-    private static let maxLiveHeight: CGFloat = 400
+    private static let maxLiveHeight: CGFloat = 156
 
     private var completedSteps: [StreamStep] {
         steps.filter { $0.status != .active }
@@ -355,6 +356,54 @@ struct StreamStepTracker: View {
             } else {
                 settledView
             }
+        } else if let preludeLabel, !preludeLabel.isEmpty {
+            preludeView(label: preludeLabel)
+        }
+    }
+
+    private func preludeView(label: String) -> some View {
+        VStack(alignment: .leading, spacing: StudioSpacing.sm) {
+            HStack(spacing: StudioSpacing.sm) {
+                Circle()
+                    .fill(StudioAccentColor.primary)
+                    .frame(width: 4, height: 4)
+                    .symbolEffect(.pulse, options: .repeating, isActive: true)
+
+                Text(label)
+                    .font(StudioTypography.captionMedium)
+                    .foregroundStyle(StudioTextColor.secondary)
+
+                Spacer(minLength: 0)
+            }
+
+            RoundedRectangle(cornerRadius: StudioRadius.md, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.04), lineWidth: 0.5)
+                .frame(height: 72)
+                .overlay(alignment: .topLeading) {
+                    VStack(alignment: .leading, spacing: StudioSpacing.xxsPlus) {
+                        Text("Waiting for the first tool call…")
+                            .font(StudioTypography.badgeSmallMono)
+                            .foregroundStyle(StudioTextColor.tertiary.opacity(0.78))
+
+                        Text("The activity lane stays mounted so new steps can stream straight in.")
+                            .font(StudioTypography.caption)
+                            .foregroundStyle(StudioTextColor.tertiary.opacity(0.56))
+                            .lineLimit(2)
+                    }
+                    .padding(.horizontal, StudioSpacing.lg)
+                    .padding(.top, StudioSpacing.md)
+                }
+                .mask(
+                    LinearGradient(
+                        stops: [
+                            .init(color: .black.opacity(0.10), location: 0.00),
+                            .init(color: .black.opacity(0.45), location: 0.55),
+                            .init(color: .black.opacity(0.80), location: 1.00),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
         }
     }
 
@@ -365,18 +414,18 @@ struct StreamStepTracker: View {
             // Summary header — always visible, shows running count
             HStack(spacing: StudioSpacing.md) {
                 Image(systemName: "circle.fill")
-                    .font(.system(size: 5))
+                    .font(.system(size: 4))
                     .foregroundStyle(StudioAccentColor.primary)
                     .symbolEffect(.pulse, options: .repeating, isActive: true)
 
                 Text(liveSummaryLabel)
-                    .font(StudioTypography.captionMedium)
+                    .font(StudioTypography.badgeSmallMono)
                     .foregroundStyle(StudioTextColor.secondary)
                     .lineLimit(1)
 
                 Spacer(minLength: 0)
             }
-            .padding(.vertical, StudioSpacing.xs)
+            .padding(.vertical, StudioSpacing.xxs)
 
             // Scrolling step feed — all steps visible, auto-scrolls to newest
             ScrollViewReader { proxy in
@@ -482,6 +531,9 @@ struct StreamStepRow: View {
 
     @Environment(\.streamDeepLinkRouter) private var streamDeepLinkRouter
     @State private var isExpanded = false
+    @State private var showAllOutput = false
+    @State private var hasCopiedOutput = false
+    @State private var consoleRevealTask: Task<Void, Never>?
 
     var body: some View {
         HStack(alignment: .top, spacing: StudioSpacing.lg) {
@@ -491,26 +543,63 @@ struct StreamStepRow: View {
                 stepHeader
 
                 if let actionLabel = deepLinkActionLabel, let deepLink = step.deepLink {
-                    Button(actionLabel) {
-                        streamDeepLinkRouter?.navigate(deepLink)
+                    HStack {
+                        Spacer(minLength: 0)
+
+                        Button(actionLabel) {
+                            streamDeepLinkRouter?.navigate(deepLink)
+                        }
+                        .buttonStyle(.plain)
+                        .font(StudioTypography.microMedium)
+                        .foregroundStyle(StudioTextColor.secondary)
                     }
-                    .buttonStyle(.plain)
-                    .font(StudioTypography.microMedium)
-                    .foregroundStyle(StudioTextColor.secondary)
                     .padding(.top, StudioSpacing.xs)
-                    .padding(.bottom, isExpanded && canExpandInline ? 4 : 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, showsInlineMutationCard || (isExpanded && canExpandInlineGeneric) ? 4 : 6)
                 }
 
-                if isExpanded && canExpandInline {
+                if let mutationBlock = mutationBlock {
+                    LiveDiffCard(block: mutationBlock, isStreaming: step.status == .active)
+                        .padding(.leading, StudioSpacing.xxs)
+                        .padding(.bottom, StudioSpacing.sm)
+                        .transition(.studioCollapse)
+                } else if isExpanded && canExpandInlineGeneric {
                     stepOutput
                         .transition(.studioCollapse)
                 }
             }
         }
         .animation(StudioMotion.standardSpring, value: isExpanded)
+        .onAppear {
+            scheduleAutoRevealIfNeeded()
+        }
+        .onDisappear {
+            consoleRevealTask?.cancel()
+            consoleRevealTask = nil
+        }
+        .onChange(of: step.inputJSON) { _, _ in
+            scheduleAutoRevealIfNeeded()
+        }
+        .onChange(of: step.outputLines.count) { _, _ in
+            scheduleAutoRevealIfNeeded()
+        }
         .onChange(of: step.status) { _, newValue in
-            guard newValue != .active, isExpanded else { return }
+            consoleRevealTask?.cancel()
+            consoleRevealTask = nil
+
+            if newValue == .active {
+                scheduleAutoRevealIfNeeded()
+                return
+            }
+
+            if newValue == .failed && isConsoleStep {
+                withAnimation(StudioMotion.softFade) {
+                    isExpanded = true
+                    showAllOutput = false
+                }
+                return
+            }
+
+            guard newValue != .active, isExpanded, !showsInlineMutationCard else { return }
             withAnimation(StudioMotion.softFade) {
                 isExpanded = false
                 showAllOutput = false
@@ -523,7 +612,7 @@ struct StreamStepRow: View {
             ZStack {
                 Circle()
                     .fill(StudioTextColor.tertiary.opacity(isActive ? 0.18 : 0.12))
-                    .frame(width: 20, height: 20)
+                    .frame(width: 16, height: 16)
 
                 stepStatusIcon
             }
@@ -537,19 +626,19 @@ struct StreamStepRow: View {
                     .padding(.bottom, -6)
             }
         }
-        .frame(width: 20)
+        .frame(width: 16)
     }
 
     private var stepHeader: some View {
         Button {
-            if canExpandInline {
+            if canExpandInlineGeneric {
                 isExpanded.toggle()
             }
         } label: {
             HStack(alignment: .top, spacing: StudioSpacing.md) {
                 VStack(alignment: .leading, spacing: StudioSpacing.xxsPlus) {
                     Text(step.title)
-                        .font(StudioTypography.footnoteSemibold)
+                        .font(StudioTypography.captionSemibold)
                         .foregroundStyle(isActive ? StudioTextColor.primary : StudioTextColor.secondary)
                         .lineLimit(1)
 
@@ -563,7 +652,7 @@ struct StreamStepRow: View {
                     if let preview = collapsedPreviewText {
                         Text(preview)
                             .font(StudioTypography.caption)
-                            .foregroundStyle(StudioTextColor.secondary)
+                            .foregroundStyle(isConsoleStep ? StudioTextColor.tertiary : StudioTextColor.secondary)
                             .lineLimit(1)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -573,21 +662,21 @@ struct StreamStepRow: View {
 
                 stepDurationView
 
-                if canExpandInline {
+                if canExpandInlineGeneric {
                     Image(systemName: "chevron.right")
                         .font(StudioTypography.badge)
                         .foregroundStyle(StudioTextColor.tertiary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 }
             }
-            .padding(.vertical, StudioSpacing.xs)
+            .padding(.vertical, StudioSpacing.xxs)
         }
         .buttonStyle(.plain)
         .shimmer(isActive: isActive)
     }
 
     private var collapsedPreviewText: String? {
-        guard !isExpanded else { return nil }
+        guard !isExpanded, !showsInlineMutationCard else { return nil }
         if let preview = step.previewText, !preview.isEmpty {
             return preview
         }
@@ -600,12 +689,24 @@ struct StreamStepRow: View {
         }
     }
 
-    private var canExpandInline: Bool {
+    private var isConsoleStep: Bool {
+        step.kind == .terminal || step.kind == .build
+    }
+
+    private var canExpandInlineGeneric: Bool {
         if step.outputLines.isEmpty { return false }
         if step.totalOutputLineCount > StreamStep.collapsedInlineOutputLines { return true }
         if nonEmptyOutputLines.count >= 2 { return true }
         guard let firstLine = nonEmptyOutputLines.first else { return false }
         return firstLine.count > 100
+    }
+
+    private var showsInlineMutationCard: Bool {
+        mutationBlock != nil
+    }
+
+    private var mutationBlock: LiveDiffBlock? {
+        StreamStepMutationCardFactory.makeBlock(from: step)
     }
 
     private var shouldHintExternalDetail: Bool {
@@ -677,9 +778,6 @@ struct StreamStepRow: View {
         }
     }
 
-    @State private var showAllOutput = false
-    @State private var hasCopiedOutput = false
-
     @ViewBuilder
     private var stepDurationView: some View {
         if let completed = step.completedAt {
@@ -715,6 +813,18 @@ struct StreamStepRow: View {
         }
     }
 
+    private func scheduleAutoRevealIfNeeded() {
+        guard isConsoleStep, step.status == .active, !isExpanded else { return }
+        consoleRevealTask?.cancel()
+        consoleRevealTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled else { return }
+            withAnimation(StudioMotion.softFade) {
+                isExpanded = true
+            }
+        }
+    }
+
     private var stepOutput: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let cmd = step.displayCommand, !cmd.isEmpty, cmd != (step.target ?? "") {
@@ -734,6 +844,12 @@ struct StreamStepRow: View {
             }
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 1) {
+                    if displayedLines.isEmpty && isConsoleStep {
+                        Text(step.status == .failed ? "Command failed before output was captured." : "Waiting for output...")
+                            .font(StudioTypography.dataMicro)
+                            .foregroundStyle(StudioTextColor.tertiary)
+                            .padding(.bottom, StudioSpacing.xxs)
+                    }
                     if !showAllOutput && step.totalOutputLineCount > StreamStep.collapsedInlineOutputLines {
                         Text("\(step.totalOutputLineCount - StreamStep.collapsedInlineOutputLines) earlier lines hidden")
                             .font(StudioTypography.badgeSmallMono)
@@ -749,16 +865,17 @@ struct StreamStepRow: View {
                     ForEach(Array(displayedLines.enumerated()), id: \.offset) { _, line in
                         Text(line)
                             .font(StudioTypography.dataMicro)
-                            .foregroundStyle(StudioTextColor.tertiary)
+                            .foregroundStyle(isConsoleStep ? Color.white.opacity(0.92) : StudioTextColor.tertiary)
                             .textSelection(.enabled)
                     }
                 }
                 .padding(.horizontal, StudioSpacing.lg)
                 .padding(.vertical, StudioSpacing.sm)
             }
-            .frame(maxHeight: showAllOutput ? 220 : 96)
+            .frame(maxHeight: isConsoleStep ? 140 : (showAllOutput ? 220 : 96))
+            .mask(outputMask)
 
-            if step.outputLines.count > StreamStep.collapsedInlineOutputLines {
+            if !isConsoleStep && step.outputLines.count > StreamStep.collapsedInlineOutputLines {
                 Button {
                     withAnimation(StudioMotion.standardSpring) {
                         showAllOutput.toggle()
@@ -788,16 +905,300 @@ struct StreamStepRow: View {
                 }
             }
         }
-        .background(step.kind == .terminal || step.kind == .build ? StudioSurface.viewport : Color.clear)
+        .background(consoleSurfaceBackground)
+        .overlay {
+            if isConsoleStep {
+                RoundedRectangle(cornerRadius: StudioRadius.md, style: .continuous)
+                    .stroke(consoleBorderColor, lineWidth: 0.5)
+            }
+        }
         .clipShape(RoundedRectangle(cornerRadius: StudioRadius.md, style: .continuous))
         .padding(.leading, StudioSpacing.xxs)
         .padding(.bottom, StudioSpacing.sm)
+    }
+
+    private var consoleSurfaceBackground: Color {
+        isConsoleStep ? Color(hex: "#0B0D10") : Color.clear
+    }
+
+    private var consoleBorderColor: Color {
+        switch step.status {
+        case .active:
+            return StudioAccentColor.primary.opacity(0.36)
+        case .completed:
+            return Color.white.opacity(0.06)
+        case .failed:
+            return StudioStatusColor.danger.opacity(0.75)
+        case .skipped:
+            return Color.white.opacity(0.04)
+        }
+    }
+
+    private var outputMask: LinearGradient {
+        if isConsoleStep {
+            return LinearGradient(
+                stops: [
+                    .init(color: .black.opacity(0.10), location: 0.00),
+                    .init(color: .black.opacity(0.40), location: 0.45),
+                    .init(color: .black.opacity(0.80), location: 1.00),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+
+        return LinearGradient(
+            stops: [
+                .init(color: .black, location: 0.0),
+                .init(color: .black, location: 1.0),
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
     }
 
     private var displayedLines: [String] {
         showAllOutput
             ? step.outputLines
             : Array(step.outputLines.suffix(StreamStep.collapsedInlineOutputLines))
+    }
+}
+
+private enum StreamStepMutationCardFactory {
+
+    private static let maxRetainedLines = 160
+
+    static func makeBlock(from step: StreamStep) -> LiveDiffBlock? {
+        let normalized = normalizedToolName(step.toolName)
+        guard normalized == "file_write" || normalized == "file_patch" else { return nil }
+        guard let inputJSON = step.inputJSON, !inputJSON.isEmpty else { return nil }
+
+        let path = extractedString(named: "path", from: inputJSON)
+            ?? extractedString(named: "filePath", from: inputJSON)
+            ?? extractedString(named: "file_path", from: inputJSON)
+            ?? step.target
+            ?? "file"
+        let filename = URL(fileURLWithPath: path).lastPathComponent.isEmpty
+            ? path
+            : URL(fileURLWithPath: path).lastPathComponent
+
+        switch normalized {
+        case "file_write":
+            let content = extractedString(named: "content", from: inputJSON) ?? ""
+            let additionLines = diffLines(from: content, kind: .addition, startingAt: 0)
+            guard !additionLines.isEmpty else { return nil }
+            return LiveDiffBlock(
+                id: step.id,
+                filename: filename,
+                filePath: path,
+                lines: additionLines,
+                additionCount: additionLines.count,
+                deletionCount: 0,
+                isComplete: step.status != .active
+            )
+
+        case "file_patch":
+            let oldString = extractedString(named: "old_string", from: inputJSON) ?? ""
+            let newString = extractedString(named: "new_string", from: inputJSON) ?? ""
+            let diff = contextualPatchLines(old: oldString, new: newString)
+            guard !diff.lines.isEmpty else { return nil }
+            return LiveDiffBlock(
+                id: step.id,
+                filename: filename,
+                filePath: path,
+                lines: diff.lines,
+                additionCount: diff.additionCount,
+                deletionCount: diff.deletionCount,
+                isComplete: step.status != .active
+            )
+
+        default:
+            return nil
+        }
+    }
+
+    private static func diffLines(from text: String, kind: LiveDiffLine.Kind, startingAt startIndex: Int) -> [LiveDiffLine] {
+        guard !text.isEmpty else { return [] }
+        return text
+            .components(separatedBy: .newlines)
+            .prefix(maxRetainedLines)
+            .enumerated()
+            .map { offset, line in
+                LiveDiffLine(id: startIndex + offset, kind: kind, text: line)
+            }
+    }
+
+    private static func contextualPatchLines(old: String, new: String) -> (lines: [LiveDiffLine], additionCount: Int, deletionCount: Int) {
+        let oldLines = splitLinesPreservingStructure(old)
+        let newLines = splitLinesPreservingStructure(new)
+
+        let prefixCount = commonPrefixCount(oldLines: oldLines, newLines: newLines)
+        let suffixCount = commonSuffixCount(oldLines: oldLines, newLines: newLines, prefixCount: prefixCount)
+
+        let oldChangeEnd = max(prefixCount, oldLines.count - suffixCount)
+        let newChangeEnd = max(prefixCount, newLines.count - suffixCount)
+
+        let prefixContext = Array(oldLines[max(0, prefixCount - 3)..<prefixCount])
+        let oldChanged = Array(oldLines[prefixCount..<oldChangeEnd])
+        let newChanged = Array(newLines[prefixCount..<newChangeEnd])
+        let suffixContextStart = newLines.count - suffixCount
+        let suffixContext = Array(newLines[suffixContextStart..<min(newLines.count, suffixContextStart + 3)])
+
+        var lines: [LiveDiffLine] = []
+        var nextID = 0
+
+        for line in prefixContext {
+            lines.append(LiveDiffLine(id: nextID, kind: .context, text: line))
+            nextID += 1
+        }
+
+        for line in oldChanged.prefix(maxRetainedLines) {
+            lines.append(LiveDiffLine(id: nextID, kind: .deletion, text: line))
+            nextID += 1
+        }
+
+        let remainingCapacity = max(0, maxRetainedLines - lines.count)
+        for line in newChanged.prefix(remainingCapacity) {
+            lines.append(LiveDiffLine(id: nextID, kind: .addition, text: line))
+            nextID += 1
+        }
+
+        let finalCapacity = max(0, maxRetainedLines - lines.count)
+        for line in suffixContext.prefix(finalCapacity) {
+            lines.append(LiveDiffLine(id: nextID, kind: .context, text: line))
+            nextID += 1
+        }
+
+        if lines.isEmpty {
+            let fallbackAdditions = diffLines(from: new, kind: .addition, startingAt: 0)
+            return (fallbackAdditions, fallbackAdditions.count, 0)
+        }
+
+        return (lines, newChanged.count, oldChanged.count)
+    }
+
+    private static func splitLinesPreservingStructure(_ text: String) -> [String] {
+        guard !text.isEmpty else { return [] }
+        return text.components(separatedBy: .newlines)
+    }
+
+    private static func commonPrefixCount(oldLines: [String], newLines: [String]) -> Int {
+        let limit = min(oldLines.count, newLines.count)
+        var count = 0
+        while count < limit, oldLines[count] == newLines[count] {
+            count += 1
+        }
+        return count
+    }
+
+    private static func commonSuffixCount(oldLines: [String], newLines: [String], prefixCount: Int) -> Int {
+        let maxComparable = min(oldLines.count, newLines.count) - prefixCount
+        guard maxComparable > 0 else { return 0 }
+
+        var count = 0
+        while count < maxComparable {
+            let oldIndex = oldLines.count - 1 - count
+            let newIndex = newLines.count - 1 - count
+            guard oldIndex >= prefixCount, newIndex >= prefixCount else { break }
+            guard oldLines[oldIndex] == newLines[newIndex] else { break }
+            count += 1
+        }
+        return count
+    }
+
+    private static func extractedString(named field: String, from inputJSON: String) -> String? {
+        if let data = inputJSON.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let value = object[field] as? String,
+           !value.isEmpty {
+            return value
+        }
+
+        let keyToken = "\"\(field)\""
+        guard let keyRange = inputJSON.range(of: keyToken) else { return nil }
+        guard let colonIndex = inputJSON[keyRange.upperBound...].firstIndex(of: ":") else { return nil }
+
+        var cursor = inputJSON.index(after: colonIndex)
+        while cursor < inputJSON.endIndex, inputJSON[cursor].isWhitespace {
+            cursor = inputJSON.index(after: cursor)
+        }
+
+        guard cursor < inputJSON.endIndex, inputJSON[cursor] == "\"" else { return nil }
+        cursor = inputJSON.index(after: cursor)
+
+        var rawValue = ""
+        var isEscaped = false
+
+        while cursor < inputJSON.endIndex {
+            let character = inputJSON[cursor]
+            cursor = inputJSON.index(after: cursor)
+
+            if isEscaped {
+                rawValue.append("\\")
+                rawValue.append(character)
+                isEscaped = false
+                continue
+            }
+
+            if character == "\\" {
+                isEscaped = true
+                continue
+            }
+
+            if character == "\"" {
+                break
+            }
+
+            rawValue.append(character)
+        }
+
+        let decoded = decodePartialJSONString(rawValue).trimmingCharacters(in: .whitespacesAndNewlines)
+        return decoded.isEmpty ? nil : decoded
+    }
+
+    private static func decodePartialJSONString(_ rawValue: String) -> String {
+        var decoded = ""
+        var iterator = rawValue.makeIterator()
+
+        while let character = iterator.next() {
+            guard character == "\\" else {
+                decoded.append(character)
+                continue
+            }
+
+            guard let escaped = iterator.next() else {
+                decoded.append("\\")
+                break
+            }
+
+            switch escaped {
+            case "n":
+                decoded.append("\n")
+            case "r":
+                decoded.append("\r")
+            case "t":
+                decoded.append("\t")
+            case "\"":
+                decoded.append("\"")
+            case "\\":
+                decoded.append("\\")
+            default:
+                decoded.append(escaped)
+            }
+        }
+
+        return decoded
+    }
+
+    private static func normalizedToolName(_ name: String) -> String {
+        switch name {
+        case "create_file", "write_file":
+            return "file_write"
+        case "apply_patch":
+            return "file_patch"
+        default:
+            return name
+        }
     }
 }
 

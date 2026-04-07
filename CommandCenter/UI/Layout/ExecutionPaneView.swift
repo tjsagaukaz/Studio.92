@@ -15,7 +15,6 @@ struct ExecutionPaneView: View {
     @EnvironmentObject private var conversationStore: ConversationStore
     @ObservedObject private var commandAccess = CommandAccessPreferenceStore.shared
     @ObservedObject private var commandApproval = CommandApprovalController.shared
-    private var todoGate: TodoGateController { TodoGateController.shared }
     @Binding var goalText: String
     @Binding var attachments: [ChatAttachment]
     let templateEngine: SessionTemplateEngine
@@ -42,7 +41,7 @@ struct ExecutionPaneView: View {
     @State private var anchorRegistry: [UUID: ActionAnchor] = [:]
     @AppStorage("packageRoot") private var storedPackageRoot = ""
 
-    private let executionColumnWidth: CGFloat = 560
+    private let executionColumnWidth: CGFloat = StudioChatLayout.columnIdealWidth
     private static let structuralSyncDebounce: Duration = .milliseconds(50)
     private static let contentUpdateDebounce: Duration = .milliseconds(16) // ~60 fps ceiling
 
@@ -167,22 +166,6 @@ struct ExecutionPaneView: View {
                     }
                     .allowsHitTesting(false)
                 }
-                .overlay(alignment: .topTrailing) {
-                    if let pending = todoGate.pendingPlan {
-                        TodoGateCard(
-                            request: pending,
-                            onApprove: { todoGate.approve() },
-                            onRefine: {
-                                goalText = ""
-                                todoGate.refine(feedback: "")
-                            }
-                        )
-                        .padding(.top, StudioSpacing.section)
-                        .padding(.trailing, StudioSpacing.sectionGap)
-                        .transition(.studioFadeLift)
-                    }
-                }
-                .animation(StudioMotion.panelSpring, value: todoGate.isGateActive)
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     VStack(spacing: 0) {
                         // Security gate — intercepts risky tool calls, slides up for authorization.
@@ -195,22 +178,6 @@ struct ExecutionPaneView: View {
                             .padding(.horizontal, StudioSpacing.sectionGap)
                             .padding(.bottom, StudioSpacing.xs)
                             .transition(.studioBottomLift)
-                        }
-
-                        // Task plan strip — slides up when a plan is detected, stays live through execution.
-                        if runner.streamCoordinator.taskPlanMonitor.isRevealed {
-                            InlineTaskPlanStrip(monitor: runner.streamCoordinator.taskPlanMonitor)
-                                .padding(.horizontal, StudioSpacing.sectionGap)
-                                .padding(.bottom, StudioSpacing.xs)
-                                .transition(.studioBottomLift)
-                        }
-
-                        // Inline terminal — sits above inspector/composer, pushes chat up
-                        if runner.streamCoordinator.terminalMonitor.isRevealed {
-                            InlineTerminalStrip(monitor: runner.streamCoordinator.terminalMonitor)
-                                .padding(.horizontal, StudioSpacing.sectionGap)
-                                .padding(.bottom, StudioSpacing.xs)
-                                .transition(.studioBottomLift)
                         }
 
                         // Session Inspector (slides up when visible)
@@ -231,13 +198,17 @@ struct ExecutionPaneView: View {
                             .transition(.studioBottomLift)
                         }
 
+                        // Live todo strip — tracks multi-step agent progress.
+                        InlineTaskPlanStrip(monitor: runner.streamCoordinator.taskPlanMonitor)
+                            .padding(.horizontal, StudioSpacing.sectionGap)
+                            .padding(.bottom, StudioSpacing.xs)
+                            .animation(StudioMotion.panelSpring, value: runner.streamCoordinator.taskPlanMonitor.isRevealed)
+
                         commandSurface(columnWidth: executionColumnWidth)
                             .padding(.horizontal, StudioSpacing.sectionGap)
                             .padding(.bottom, StudioSpacing.section)
                     }
                     .animation(StudioMotion.panelSpring, value: commandApproval.pendingRequest != nil)
-                    .animation(StudioMotion.panelSpring, value: runner.streamCoordinator.terminalMonitor.isRevealed)
-                    .animation(StudioMotion.panelSpring, value: runner.streamCoordinator.taskPlanMonitor.isRevealed)
                 }
                 .safeAreaInset(edge: .top, spacing: 0) {
                     ContextHeaderView(

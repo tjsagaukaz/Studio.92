@@ -41,7 +41,11 @@ struct ReasoningHUD: View {
 
     var body: some View {
         if isVisible {
-            HUDScrollCard(lines: allLines, maxWidth: maxWidth)
+            HUDScrollCard(
+                lines: allLines,
+                maxWidth: maxWidth,
+                isExecuting: isExecuting
+            )
                 .transition(
                     .asymmetric(
                         insertion: .opacity
@@ -52,6 +56,13 @@ struct ReasoningHUD: View {
                     )
                 )
         }
+    }
+
+    private var isExecuting: Bool {
+        if case .executing = controller.phase {
+            return true
+        }
+        return false
     }
 }
 
@@ -66,8 +77,15 @@ private struct HUDScrollCard: View {
 
     let lines: [ReasoningLine]
     let maxWidth: CGFloat
+    let isExecuting: Bool
 
-    private static let visibleLineCount = 7
+    private var visibleLineCount: Int {
+        isExecuting ? 4 : 7
+    }
+
+    private var displayedLines: [ReasoningLine] {
+        Array(lines.suffix(visibleLineCount))
+    }
 
     @State private var isPulsing = false
 
@@ -96,24 +114,24 @@ private struct HUDScrollCard: View {
             .frame(width: 3)
 
             // ── Dissolving ticker ────────────────────────────────────────
-            if !lines.isEmpty {
+            if !displayedLines.isEmpty {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical, showsIndicators: false) {
                         VStack(alignment: .leading, spacing: StudioSpacing.xs) {
-                            ForEach(lines) { line in
+                            ForEach(displayedLines) { line in
                                 Text(line.text)
-                                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                                    .font(.system(size: 11, weight: .regular, design: .monospaced))
                                     .foregroundStyle(
                                         Color(hex: "#7E8794").opacity(lineOpacity(for: line))
                                     )
-                                    .lineLimit(2)
+                                    .lineLimit(isExecuting ? 2 : 3)
                                     .truncationMode(.tail)
                                     .id(line.id)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxHeight: CGFloat(Self.visibleLineCount) * 15)
+                    .frame(maxHeight: CGFloat(visibleLineCount) * 15)
                     .mask(
                         // Top 20% dissolves lines into the background as they scroll up.
                         // Bottom 10% dissolves the clipping edge of the frame.
@@ -128,29 +146,33 @@ private struct HUDScrollCard: View {
                             endPoint: .bottom
                         )
                     )
-                    .onChange(of: lines.count) { _, _ in
+                    .onChange(of: displayedLines.count) { _, _ in
                         withAnimation(.easeOut(duration: 0.18)) {
-                            proxy.scrollTo(lines.last?.id, anchor: .bottom)
+                            proxy.scrollTo(displayedLines.last?.id, anchor: .bottom)
                         }
                     }
-                    .onChange(of: lines.last?.text) { _, _ in
+                    .onChange(of: displayedLines.last?.text) { _, _ in
                         withAnimation(.easeOut(duration: 0.18)) {
-                            proxy.scrollTo(lines.last?.id, anchor: .bottom)
+                            proxy.scrollTo(displayedLines.last?.id, anchor: .bottom)
                         }
                     }
                 }
             }
         }
         .frame(maxWidth: maxWidth, alignment: .leading)
+        .opacity(isExecuting ? 0.82 : 1.0)
         // No background — no card, no border, no shadow. Pure ambient data.
     }
 
     /// Bottom line is brightest (0.60); each step back fades by 0.07, floor 0.18.
     private func lineOpacity(for line: ReasoningLine) -> Double {
-        guard lines.count > 1 else { return 0.60 }
-        let lastIndex = lines.last?.index ?? 0
+        guard displayedLines.count > 1 else { return isExecuting ? 0.62 : 0.72 }
+        let lastIndex = displayedLines.last?.index ?? 0
         let distance = lastIndex - line.index
-        return max(0.18, 0.60 - Double(distance) * 0.07)
+        let peak = isExecuting ? 0.62 : 0.72
+        let floor = isExecuting ? 0.20 : 0.26
+        let decay = isExecuting ? 0.10 : 0.08
+        return max(floor, peak - Double(distance) * decay)
     }
 }
 
