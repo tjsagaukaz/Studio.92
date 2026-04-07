@@ -133,6 +133,11 @@ private struct HUDScrollCard: View {
                             proxy.scrollTo(lines.last?.id, anchor: .bottom)
                         }
                     }
+                    .onChange(of: lines.last?.text) { _, _ in
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            proxy.scrollTo(lines.last?.id, anchor: .bottom)
+                        }
+                    }
                 }
             }
         }

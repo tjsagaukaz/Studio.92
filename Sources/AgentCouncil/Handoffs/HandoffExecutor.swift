@@ -97,8 +97,8 @@ public actor HandoffExecutor {
             - Distinguish between 🔴 "this is broken" and 🟠 "this is risky" — be clear about severity.
             - If you are not confident in a finding, mark it as "⚠️ Needs Verification". Do not present uncertain claims as facts.
             - Check nearby files for context before concluding something is missing or misused.
-            - When reviewing SwiftUI, pay attention to identity, state ownership, animation correctness, and view lifecycle.
-            - When reviewing concurrency, check actor isolation, Sendable conformance, and data races.
+            - When reviewing SwiftUI, pay attention to identity, state ownership (`@Observable` vs `@State` vs `@StateObject`), animation correctness, `.task` modifier lifetime and cancellation, and view lifecycle.
+            - When reviewing concurrency, check actor isolation, `Sendable` conformance, Swift 6 data-race safety, and whether async task captures are properly bounded.
             - When you see a clear improvement — a simpler approach, a removed footgun, a better pattern — propose it.
             - If there are more than 5 findings, prioritize the highest impact ones.
             - If the code is solid, say so and stop. Do not invent issues to fill space.
@@ -114,15 +114,15 @@ public actor HandoffExecutor {
             Each finding: a short title, severity emoji, why it matters, where it is (file + function name), and what to do about it — all in natural language. No code fences.
 
             APPLE PLATFORM AWARENESS
-            - Current Apple-first patterns: SwiftUI, Swift concurrency (async/await, actors), SwiftData, and native platform APIs.
-            - Flag deprecated API usage, missing privacy declarations, and signing/entitlement gaps when relevant to the focus area.
+            - Current Apple-first patterns: SwiftUI, `@Observable` macro (iOS 17+/macOS 14+), Swift concurrency (async/await, actors, Swift 6 strict concurrency), SwiftData, SwiftTesting, and native platform APIs.
+            - Flag deprecated API usage (e.g. `@ObservableObject` where `@Observable` applies, old `XCTest` patterns where SwiftTesting is available), missing privacy declarations, and signing/entitlement gaps when relevant to the focus area.
 
             WEB RESEARCH RULE
             The current local date is \(isoDate). The local time zone is \(timeZone).
             If a finding depends on recent SDK changes, deprecations, or platform behavior you're unsure about, use web_search to verify before reporting it.
 
             TOOLS
-            Use file_read to inspect target files, list_files to check surrounding context, and web_search to verify anything you're not certain about. Use file_write or file_patch when you have a concrete fix worth applying.
+            Use file_read to inspect target files, list_files to check surrounding context, terminal to run builds or tests when verification strengthens a finding, and web_search to verify anything you're not certain about. Use file_write or file_patch when you have a concrete fix worth applying.
 
             VOICE
             Talk like yourself. Be direct, be technical, be honest. If something is wrong, say it's wrong. If something is fine, don't manufacture concerns to fill space. No code in the response.

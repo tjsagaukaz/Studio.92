@@ -58,6 +58,13 @@ struct NarrativeRenderer {
 
 enum Studio92Voice {
 
+    // MARK: - Cached Regex Patterns
+
+    private static let sentenceSplitRegex = try! NSRegularExpression(pattern: #"(?<=[.!?])\s+(?=[A-Z])"#)
+    private static let sentenceBoundaryRegex = try! NSRegularExpression(pattern: #"[.!?]\s+"#)
+    private static let postPunctuationCapitalizeRegex = try! NSRegularExpression(pattern: #"([.!?])\s+([a-z])"#)
+    private static let newlineCapitalizeRegex = try! NSRegularExpression(pattern: #"\n\s*([a-z])"#)
+
     // MARK: - Debug Controls
 
     static var debugSkipCompress        = false
@@ -159,8 +166,8 @@ enum Studio92Voice {
     private static func normalizeSentences(_ text: String) -> String {
         mapProse(text) { prose in
             var p = capitalizeFirstVisible(prose)
-            p = regexCapitalize(p, pattern: #"([.!?])\s+([a-z])"#, group: 2)
-            p = regexCapitalize(p, pattern: #"\n\s*([a-z])"#, group: 1)
+            p = regexCapitalize(p, regex: postPunctuationCapitalizeRegex, group: 2)
+            p = regexCapitalize(p, regex: newlineCapitalizeRegex, group: 1)
             return p
         }
     }
@@ -224,9 +231,7 @@ enum Studio92Voice {
     /// Splits text into sentences at `. ` / `! ` / `? ` boundaries,
     /// guarding against abbreviations and decimals.
     private static func splitSentences(_ text: String) -> [String] {
-        guard let regex = try? NSRegularExpression(pattern: #"(?<=[.!?])\s+(?=[A-Z])"#) else {
-            return [text]
-        }
+        let regex = sentenceSplitRegex
         let nsText = text as NSString
         let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
         guard !matches.isEmpty else { return [text] }
@@ -391,7 +396,7 @@ enum Studio92Voice {
 
     private static func splitAtSentenceBoundary(_ paragraph: String) -> String {
         let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let regex = try? NSRegularExpression(pattern: #"[.!?]\s+"#) else { return paragraph }
+        let regex = sentenceBoundaryRegex
 
         let nsText = trimmed as NSString
         let matches = regex.matches(in: trimmed, range: NSRange(location: 0, length: nsText.length))
@@ -410,7 +415,7 @@ enum Studio92Voice {
 
     private static func splitAfterFirstSentence(_ paragraph: String) -> String {
         let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let regex = try? NSRegularExpression(pattern: #"[.!?]\s+"#) else { return paragraph }
+        let regex = sentenceBoundaryRegex
 
         let nsText = trimmed as NSString
         let matches = regex.matches(in: trimmed, range: NSRange(location: 0, length: nsText.length))
@@ -642,8 +647,7 @@ enum Studio92Voice {
     }
 
     /// Capitalizes the capture group in all matches, working backwards for index safety.
-    private static func regexCapitalize(_ text: String, pattern: String, group: Int) -> String {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+    private static func regexCapitalize(_ text: String, regex: NSRegularExpression, group: Int) -> String {
         let nsText = text as NSString
         var result = text
         let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))

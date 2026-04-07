@@ -702,7 +702,7 @@ private struct InlineToolTraceGroup: View {
         }
 
         parts += counts.sorted(by: { $0.value > $1.value }).prefix(3).map { kind, count in
-            "\(verbPastTense(kind)) \(count) \(count == 1 ? "file" : "files")"
+            "\(verbPastTense(kind)) \(count) \(nounForKind(kind, count: count))"
         }
 
         if parts.isEmpty { return "Ran tools" }
@@ -723,7 +723,7 @@ private struct InlineToolTraceGroup: View {
                 } label: {
                     HStack(spacing: StudioSpacing.sm) {
                         Image(systemName: hasLive ? (hasWeb ? "globe" : "circle.fill") : (hasWeb ? "globe" : "checkmark"))
-                            .font(.system(size: hasLive && !hasWeb ? 5 : (hasWeb ? 10 : 8), weight: .semibold))
+                            .font(.system(size: hasLive && !hasWeb ? 7 : (hasWeb ? 10 : 8), weight: .semibold))
                             .foregroundStyle(hasLive ? StudioAccentColor.primary : StudioTextColor.tertiary)
                             .frame(width: 12)
 
@@ -894,6 +894,21 @@ private struct InlineToolTraceGroup: View {
         case .terminal: return "Ran"
         case .screenshot: return "Captured"
         case .artifact: return "Created"
+        }
+    }
+
+    private func nounForKind(_ kind: ToolTrace.Kind, count: Int) -> String {
+        switch kind {
+        case .search, .read, .edit, .write:
+            return count == 1 ? "file" : "files"
+        case .build:
+            return count == 1 ? "target" : "targets"
+        case .terminal:
+            return count == 1 ? "command" : "commands"
+        case .screenshot:
+            return count == 1 ? "screenshot" : "screenshots"
+        case .artifact:
+            return count == 1 ? "artifact" : "artifacts"
         }
     }
 }
@@ -2374,7 +2389,7 @@ private struct ReasoningPopoverContent: View {
                 MarkdownMessageContent(text: text, tone: .meta)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxHeight: 320)
+            .frame(maxHeight: 480)
         }
         .padding(StudioSpacing.section)
         .frame(width: 320)

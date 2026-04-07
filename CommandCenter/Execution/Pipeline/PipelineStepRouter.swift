@@ -428,8 +428,8 @@ enum PipelineMemoryPackStager {
             DEEP AUDIT MODE
             - Go deeper than a surface review. Check assumptions. Verify cross-file interactions.
             - Reason about runtime behavior, not just syntax. Trace state through lifecycle events.
-            - When reviewing concurrency, verify actor isolation boundaries, Sendable correctness, and potential data races across the call graph — not just within a single file.
-            - When reviewing SwiftUI, check view identity stability, state ownership correctness (@State vs @StateObject vs @ObservedObject), and lifecycle ordering.
+            - When reviewing concurrency, verify actor isolation boundaries, `Sendable` correctness, Swift 6 data-race safety, and potential races across the call graph — not just within a single file.
+            - When reviewing SwiftUI, check view identity stability, state ownership correctness (`@Observable` macro for iOS 17+/macOS 14+, vs `@State`/`@StateObject`/`@ObservedObject` on older targets), `.task` modifier lifetime and cancellation, and lifecycle ordering.
             - When reviewing persistence (SwiftData/CoreData), verify thread safety, relationship consistency, and migration paths.
 
             REVIEW STANDARDS
@@ -477,8 +477,8 @@ enum PipelineMemoryPackStager {
             - Distinguish between 🔴 "this is broken" and 🟠 "this is risky" — be clear about severity.
             - If you are not confident in a finding, mark it as "⚠️ Needs Verification". Do not present uncertain claims as facts.
             - Check nearby files for context before concluding something is missing or misused.
-            - When reviewing SwiftUI, pay attention to identity, state ownership, animation correctness, and view lifecycle.
-            - When reviewing concurrency, check actor isolation, Sendable conformance, and data races.
+            - When reviewing SwiftUI, pay attention to identity, state ownership (`@Observable` vs `@State` vs `@StateObject`), animation correctness, `.task` modifier lifetime and cancellation, and view lifecycle.
+            - When reviewing concurrency, check actor isolation, `Sendable` conformance, Swift 6 data-race safety, and whether async task captures are properly bounded.
             - When you see a clear improvement — a simpler approach, a removed footgun, a better pattern — propose it.
             - If there are more than 5 findings, prioritize the highest impact ones.
             - If the code is solid, say so and stop. Do not invent issues to fill space.
@@ -610,9 +610,22 @@ enum PipelineMemoryPackStager {
 
         <planning>
         \(dagActive
-            ? "- When asked to build or change a feature, begin with a concise markdown checklist using `- [ ] Task`."
-            : "- Do not emit a task checklist unless the task is genuinely complex and multi-step.")
-        - Prefer executing over planning. If the task is clear, skip the plan and start building.
+            ? """
+            - When the task has 3 or more distinct, sequential steps, declare a plan block before starting:
+
+              [PLAN title="Short descriptive title"]
+              - [ ] Step one
+              - [ ] Step two
+              - [ ] Step three
+              [/PLAN]
+
+              The plan is routed to the task panel. Do not repeat the steps as prose after the block.
+              Start executing immediately after the [/PLAN] marker.
+            """
+            : "- Do not emit a plan block unless the task is genuinely multi-step (3 or more distinct sequential actions).")
+        - Use checklist format (- [ ]) inside [PLAN] blocks, not numbered lists.
+        - Do not emit [PLAN] for explanatory lists, file inventories, search results, or single-action responses.
+        - Prefer executing over planning. If the task is clear, emit [PLAN] then immediately start building.
         </planning>
 
         <loop_discipline>

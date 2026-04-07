@@ -318,12 +318,18 @@ final class CompactionCoordinator {
 
         Schema:
         {
-          "goals": ["active goals the user is working toward"],
-          "decisions": ["decisions that were made and should be preserved"],
-          "artifacts": ["files created, modified, or referenced"],
-          "preferences": ["user preferences or working style notes, if any"],
-          "open_tasks": ["tasks that are still pending or in progress"]
+          "goals": ["active goals the user is working toward — be specific, not generic"],
+          "decisions": ["decisions that were made and should be preserved, with enough context to act on them"],
+          "artifacts": ["files created or modified — use exact paths as they appear in the conversation, noting status: created/modified"],
+          "preferences": ["confirmed user preferences about code style, tooling, or working style — only if explicitly stated, not inferred"],
+          "open_tasks": ["tasks that are still pending or in progress — ordered by relevance to current context"]
         }
+
+        Rules:
+        - Preserve exact file paths. Do not truncate or paraphrase paths.
+        - Only include preferences the user explicitly stated. Do not infer preferences from behavior.
+        - Open tasks should reflect actual blocking items, not vague "continue working" entries.
+        - Omit empty arrays rather than including them as [].
 
         Conversation:
         \(transcript)
@@ -332,7 +338,7 @@ final class CompactionCoordinator {
         let body: [String: Any] = [
             "model": model,
             "max_tokens": 2048,
-            "system": "You are a precise conversation state extractor. Output only valid JSON matching the requested schema. Preserve execution state, not narrative.",
+            "system": "You are a precise conversation state extractor. Output only valid JSON matching the requested schema. Rules: preserve exact file paths as they appear in the conversation; mark artifact completion state (created, modified, or referenced); do not paraphrase user statements as preferences; distinguish open tasks from completed ones; omit empty arrays. Preserve execution state, not narrative.",
             "messages": [
                 ["role": "user", "content": summarizationPrompt]
             ]

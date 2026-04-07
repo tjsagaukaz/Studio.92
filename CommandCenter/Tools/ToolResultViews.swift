@@ -1050,7 +1050,7 @@ struct ArtifactConsoleBlock: View {
 
     init(toolCall: ToolCall) {
         self.toolCall = toolCall
-        _isExpanded = State(initialValue: toolCall.status == .active || toolCall.status == .failed)
+        _isExpanded = State(initialValue: false)
     }
 
     var body: some View {
@@ -1155,6 +1155,11 @@ struct ArtifactConsoleBlock: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: StudioRadius.xl, style: .continuous))
         .animation(StudioMotion.standardSpring, value: toolCall.status)
+        .onAppear {
+            if toolCall.status == .active || toolCall.status == .failed {
+                isExpanded = true
+            }
+        }
         .onChange(of: toolCall.status) { _, newStatus in
             if newStatus == .active || newStatus == .failed {
                 withAnimation(StudioMotion.standardSpring) {

@@ -364,10 +364,7 @@ struct MarkdownInlineText: View {
     var tone: MarkdownMessageContent.Tone = .body
 
     var body: some View {
-        if var attributed = try? AttributedString(
-            markdown: text,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        ) {
+        if var attributed = Self.cachedAttributedString(text: text, tone: tone) {
             let _ = Self.refineAttributes(&attributed, tone: tone)
             Text(attributed)
                 .font(font)
@@ -382,6 +379,31 @@ struct MarkdownInlineText: View {
                 .foregroundStyle(foregroundStyle)
                 .lineSpacing(lineSpacing)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - AttributedString Cache
+
+    private static let cacheQueue = DispatchQueue(label: "studio92.markdown.inline-cache")
+    private static var cache: [String: AttributedString] = [:]
+    private static let cacheCapacity = 256
+
+    private static func cachedAttributedString(text: String, tone: MarkdownMessageContent.Tone) -> AttributedString? {
+        let key = "\(tone)-\(text)"
+        return cacheQueue.sync {
+            if let hit = cache[key] { return hit }
+            guard let parsed = try? AttributedString(
+                markdown: text,
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            ) else { return nil }
+            if cache.count >= cacheCapacity {
+                // Evict ~25% on capacity — simple but effective for streaming where
+                // older blocks are rarely revisited.
+                let keysToRemove = Array(cache.keys.prefix(cacheCapacity / 4))
+                for k in keysToRemove { cache.removeValue(forKey: k) }
+            }
+            cache[key] = parsed
+            return parsed
         }
     }
 
@@ -1118,13 +1140,15 @@ struct MarkdownBlock: Identifiable {
         )
     }
 
+    private static let checklistRegex = try! NSRegularExpression(pattern: #"^[-*]\s+\[( |x|X)\]\s+"#)
+    private static let orderedListRegex = try! NSRegularExpression(pattern: #"^(\d+)\.\s+"#)
+
     private static func checklistItem(in line: String) -> (title: String, isCompleted: Bool)? {
-        guard let match = line.range(
-            of: #"^[-*]\s+\[( |x|X)\]\s+"#,
-            options: .regularExpression
-        ) else {
+        let nsLine = line as NSString
+        guard let result = checklistRegex.firstMatch(in: line, range: NSRange(location: 0, length: nsLine.length)) else {
             return nil
         }
+        let match = Range(result.range, in: line)!
 
         let prefix = String(line[match])
         let title = String(line[match.upperBound...]).trimmingCharacters(in: .whitespaces)
@@ -1148,7 +1172,9 @@ struct MarkdownBlock: Identifiable {
             )
         }
 
-        guard let match = trimmed.range(of: #"^(\d+)\.\s+"#, options: .regularExpression) else {
+        let nsTrimmed = trimmed as NSString
+        guard let result = orderedListRegex.firstMatch(in: trimmed, range: NSRange(location: 0, length: nsTrimmed.length)),
+              let match = Range(result.range, in: trimmed) else {
             return nil
         }
 
@@ -1307,9 +1333,26 @@ struct MarkdownBlock: Identifiable {
         )
     }
 
+    private static let blockCounter = AtomicBlockCounter()
+
     private static func stableID(prefix: String, content: String) -> String {
-        let digest = String(content.hashValue, radix: 16, uppercase: false)
-        return "\(prefix)-\(digest)"
+        let ordinal = blockCounter.next()
+        return "\(prefix)-\(ordinal)"
+    }
+}
+
+/// Thread-safe monotonic counter for generating unique block IDs within a parse pass.
+/// Uses `OSAtomicIncrement64` semantics via `os_unfair_lock` for minimal overhead.
+private final class AtomicBlockCounter: @unchecked Sendable {
+    private var value: Int = 0
+    private let lock = NSLock()
+
+    func next() -> Int {
+        lock.lock()
+        value += 1
+        let v = value
+        lock.unlock()
+        return v
     }
 }
 

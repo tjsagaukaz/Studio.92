@@ -807,7 +807,61 @@ struct SemanticEventTransformer {
     }
 
     /// Detect whether narrative text contains a structured plan.
-    /// Returns a StreamPlan if a numbered/bulleted list is found.
+    /// Marker-first plan detection: parses explicit [PLAN title="..."]...[/PLAN] blocks
+    /// emitted by the model. Takes priority over heuristic detection.
+    private static func detectMarkedPlan(in text: String) -> StreamPlan? {
+        // Require both opening and closing markers.
+        guard let openRange = text.range(of: #"\[PLAN(?:\s+title="([^"]*)")?\]"#, options: .regularExpression),
+              let closeRange = text.range(of: "[/PLAN]"),
+              openRange.upperBound <= closeRange.lowerBound else { return nil }
+
+        // Extract optional title attribute.
+        var title = "Plan"
+        let markerText = String(text[openRange])
+        if let titleCapture = markerText.range(of: #"title="([^"]*)"#, options: .regularExpression) {
+            let raw = String(markerText[titleCapture])           // title="Foo"
+            if let first = raw.firstIndex(of: "\""),
+               let last  = raw.lastIndex(of: "\""),
+               first < last {
+                title = String(raw[raw.index(after: first)..<last])
+            }
+        }
+
+        let body = String(text[openRange.upperBound..<closeRange.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var steps: [StreamPlanStep] = []
+        var ordinal = 0
+
+        for line in body.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Checklist items: - [ ] or - [x]
+            if trimmed.hasPrefix("- [ ] ") || trimmed.hasPrefix("- [x] ") || trimmed.hasPrefix("- [X] ") {
+                ordinal += 1
+                steps.append(StreamPlanStep(id: "plan-step-\(ordinal)", title: String(trimmed.dropFirst(6)), ordinal: ordinal))
+            }
+            // Numbered items: 1. or 1)
+            else if let range = trimmed.range(of: #"^\d+[\.\)]\s+"#, options: .regularExpression) {
+                ordinal += 1
+                steps.append(StreamPlanStep(id: "plan-step-\(ordinal)", title: String(trimmed[range.upperBound...]), ordinal: ordinal))
+            }
+            // Indented sub-bullets under the last top-level step
+            else if (line.hasPrefix("   ") || line.hasPrefix("\t")), !steps.isEmpty,
+                    trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+                steps[steps.count - 1].substeps.append(String(trimmed.dropFirst(2)))
+            }
+        }
+
+        // Model explicitly marked this as a plan — accept with ≥1 step.
+        guard !steps.isEmpty else { return nil }
+        return StreamPlan(title: title, steps: Array(steps.prefix(8)), isFinalized: true)
+    }
+
+    /// Returns a StreamPlan if a plan block is detected in the text.
+    ///
+    /// Detection order:
+    /// 1. Explicit [PLAN title="..."]...[/PLAN] marker block (deterministic — model intent is clear).
+    /// 2. Heuristic: numbered/bulleted/checklist list that looks actionable.
     ///
     /// Heuristics to avoid false positives on informational numbered lists:
     /// - Steps must look *actionable* (short, imperative, ≤120 chars each)
@@ -815,6 +869,9 @@ struct SemanticEventTransformer {
     /// - Requires ≥2 qualifying steps
     /// - Checklist syntax (`- [ ]`) is always treated as a plan
     static func detectPlan(in text: String) -> StreamPlan? {
+        // Marker-first: model explicitly tagged a plan block — skip heuristics.
+        if let markerPlan = detectMarkedPlan(in: text) { return markerPlan }
+
         let lines = text.components(separatedBy: .newlines)
         var planSteps: [StreamPlanStep] = []
         var planTitle = "Plan"
@@ -1301,6 +1358,9 @@ final class StreamPipelineCoordinator {
     @ObservationIgnored private var activeToolSpans: [String: UUID] = [:]
     @ObservationIgnored private var accumulatedNarrative = ""
     @ObservationIgnored private var planDetected = false
+    /// True while the stream is inside a [PLAN]...[/PLAN] block emitted by the model.
+    /// Text is suppressed from the narrative chunker until the block closes.
+    @ObservationIgnored private var awaitingPlanMarkerClose = false
     @ObservationIgnored private var chunkFlushTask: Task<Void, Never>?
     /// When true, the deterministic plan from TaskPlanBridge is already driving the
     /// InlineTaskPlanMonitor. Narrative-detected plans still render in the viewport
@@ -1411,6 +1471,7 @@ final class StreamPipelineCoordinator {
         activeToolSpans = [:]
         accumulatedNarrative = ""
         planDetected = false
+        awaitingPlanMarkerClose = false
         hasDeterministicPlan = false
         didDetectPlan = false
         onPlanDetected = nil
@@ -1433,6 +1494,15 @@ final class StreamPipelineCoordinator {
             refreshViewportPlan()
         }
 
+        // Track whether we're inside a [PLAN]...[/PLAN] marker block.
+        // Suppress text to the narrative chunker while inside the block so partial plan
+        // content doesn't leak into the chat thread.
+        if !planDetected {
+            if !awaitingPlanMarkerClose && accumulatedNarrative.contains("[PLAN") {
+                awaitingPlanMarkerClose = true
+            }
+        }
+
         // Try to detect plan in accumulated text (once).
         // Cap scan window to avoid O(n²) re-scanning on every token.
         if !planDetected && accumulatedNarrative.count > 60 {
@@ -1444,10 +1514,15 @@ final class StreamPipelineCoordinator {
             }
             if let plan = SemanticEventTransformer.detectPlan(in: scanWindow) {
                 planDetected = true
+                awaitingPlanMarkerClose = false
                 phaseController.setPlan(plan)
                 driveViewportPlan(plan)
             }
         }
+
+        // Don't forward plan-marker content to the narrative chunker — it belongs
+        // in the task panel, not the chat thread.
+        guard !awaitingPlanMarkerClose else { return }
 
         Task {
             if let chunk = await chunker.append(text) {
