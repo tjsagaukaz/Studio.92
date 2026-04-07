@@ -138,6 +138,8 @@ actor AgenticClient {
     let sandbox: SandboxPolicy
     let recovery: RecoveryExecutor
     let session:     URLSession
+    let ambientContextSnapshot: AmbientEditorContext?
+    weak var ambientContextCoordinator: AmbientEditorContextCoordinator?
 
     /// Scoped memory context for subagent delegation (explorer/reviewer).
     var subagentMemoryContext: String?
@@ -164,6 +166,8 @@ actor AgenticClient {
         runtimePolicy: CommandRuntimePolicy? = nil,
         permissionPolicy: ToolPermissionPolicy = ToolPermissionPolicy(),
         allowMachineWideAccess: Bool = true,
+        ambientContextSnapshot: AmbientEditorContext? = nil,
+        ambientContextCoordinator: AmbientEditorContextCoordinator? = nil,
         session: URLSession = AgenticClient.defaultSession
     ) {
         self.anthropicAPIKey = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -177,6 +181,8 @@ actor AgenticClient {
         self.permissionPolicy = permissionPolicy
         self.sandbox = SandboxPolicy(projectRoot: projectRoot, allowMachineWideAccess: allowMachineWideAccess)
         self.recovery = RecoveryExecutor()
+        self.ambientContextSnapshot = ambientContextSnapshot
+        self.ambientContextCoordinator = ambientContextCoordinator
         self.session     = session
     }
 

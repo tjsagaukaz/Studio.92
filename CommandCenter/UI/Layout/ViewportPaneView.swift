@@ -4,6 +4,7 @@ import SwiftUI
 struct ViewportPaneView: View {
 
     let model: ViewportStreamModel
+    let ambientContext: AmbientEditorContextCoordinator
     let previewService: SimulatorPreviewService
     var onHide: (() -> Void)?
     var onDiagnoseError: (() -> Void)?
@@ -164,6 +165,12 @@ struct ViewportPaneView: View {
                     contentArrivalScale = 1.0
                     contentArrivalOpacity = 1.0
                 }
+            }
+
+            if case .filePreview = newContent {
+                // Keep the existing selection for the active file preview.
+            } else {
+                ambientContext.clearSelection()
             }
         }
         .onChange(of: model.phase) { _, newPhase in
@@ -366,15 +373,12 @@ struct ViewportPaneView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 case .ready(let content):
-                    ScrollView([.vertical, .horizontal]) {
-                        Text(CodeSyntaxHighlighter.highlight(
-                            code: content.isEmpty ? " " : content,
-                            language: fileModel.language
-                        ))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(StudioSpacing.section)
-                            .textSelection(.enabled)
-                    }
+                    AmbientContextCodePreview(
+                        path: fileModel.path,
+                        language: fileModel.language,
+                        content: content,
+                        ambientContext: ambientContext
+                    )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(StudioSurface.viewport)
                 }
@@ -413,6 +417,108 @@ struct ViewportPaneView: View {
     private func fallbackAspectRatio(for image: NSImage) -> CGFloat {
         guard image.size.height > 0 else { return 0.5 }
         return image.size.width / image.size.height
+    }
+}
+
+private struct AmbientContextCodePreview: NSViewRepresentable {
+
+    let path: String
+    let language: String?
+    let content: String
+    let ambientContext: AmbientEditorContextCoordinator
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.importsGraphics = false
+        textView.isRichText = true
+        textView.textContainerInset = NSSize(width: 16, height: 16)
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.delegate = context.coordinator
+
+        scrollView.documentView = textView
+        context.coordinator.applyContent(to: textView, parent: self)
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        guard let textView = nsView.documentView as? NSTextView else { return }
+        context.coordinator.parent = self
+        context.coordinator.applyContent(to: textView, parent: self)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextViewDelegate {
+
+        var parent: AmbientContextCodePreview
+        private var lastIdentity: String?
+
+        init(parent: AmbientContextCodePreview) {
+            self.parent = parent
+        }
+
+        func applyContent(to textView: NSTextView, parent: AmbientContextCodePreview) {
+            let identity = "\(parent.path)::\(parent.content.count)"
+            if identity != lastIdentity {
+                textView.textStorage?.setAttributedString(NSAttributedString(
+                    CodeSyntaxHighlighter.highlight(
+                        code: parent.content.isEmpty ? " " : parent.content,
+                        language: parent.language
+                    )
+                ))
+                textView.setSelectedRange(NSRange(location: 0, length: 0))
+                lastIdentity = identity
+            }
+
+            parent.ambientContext.notePresentedFile(
+                path: parent.path,
+                language: parent.language,
+                isDirty: false,
+                content: parent.content,
+                openFiles: [
+                    OpenFileContext(
+                        path: parent.path,
+                        language: parent.language,
+                        isDirty: false,
+                        lastFocusedAt: Date()
+                    )
+                ]
+            )
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.ambientContext.noteSelection(
+                path: parent.path,
+                content: parent.content,
+                selection: textView.selectedRange(),
+                language: parent.language,
+                isDirty: false,
+                openFiles: [
+                    OpenFileContext(
+                        path: parent.path,
+                        language: parent.language,
+                        isDirty: false,
+                        lastFocusedAt: Date()
+                    )
+                ]
+            )
+        }
     }
 }
 

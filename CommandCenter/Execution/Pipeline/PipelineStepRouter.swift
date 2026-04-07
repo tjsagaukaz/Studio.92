@@ -837,11 +837,19 @@ enum PipelineMemoryPackStager {
 
     static func prepareAgenticUserInput(
         goal: String,
-        attachments: [ChatAttachment]
+        attachments: [ChatAttachment],
+        ambientContext: AmbientEditorContext? = nil,
+        workspaceRoot: String? = nil
     ) async -> PreparedAgenticUserInput {
+        let userMessage = composeUserMessage(
+            goal: goal,
+            ambientContext: ambientContext,
+            workspaceRoot: workspaceRoot
+        )
+
         guard let imageAttachment = attachments.first(where: { $0.isImage }) else {
             return PreparedAgenticUserInput(
-                userMessage: goal,
+                userMessage: userMessage,
                 userContentBlocks: nil,
                 hasVisualReference: false,
                 multimodalPreset: nil,
@@ -860,7 +868,7 @@ enum PipelineMemoryPackStager {
                 maxDimension: shape.maxImageDimension,
                 compressionQuality: shape.compressionQuality
             ) {
-                var textContent = goal
+                var textContent = userMessage
                 if let extractor {
                     textContent += "\n\n" + extractor.extractionPrompt
                 }
@@ -869,7 +877,7 @@ enum PipelineMemoryPackStager {
                 }
 
                 return PreparedAgenticUserInput(
-                    userMessage: goal,
+                    userMessage: userMessage,
                     userContentBlocks: [
                         ["type": "input_text", "text": textContent],
                         imageBlock
@@ -883,7 +891,7 @@ enum PipelineMemoryPackStager {
 
         guard let imageBlock = await VisionPayloadBuilder.imageContentBlock(from: imageAttachment.url) else {
             return PreparedAgenticUserInput(
-                userMessage: goal,
+                userMessage: userMessage,
                 userContentBlocks: nil,
                 hasVisualReference: false,
                 multimodalPreset: preset,
@@ -892,15 +900,34 @@ enum PipelineMemoryPackStager {
         }
 
         return PreparedAgenticUserInput(
-            userMessage: goal,
+            userMessage: userMessage,
             userContentBlocks: [
-                ["type": "text", "text": goal],
+                ["type": "text", "text": userMessage],
                 imageBlock
             ],
             hasVisualReference: true,
             multimodalPreset: preset,
             extractorSchema: extractor
         )
+    }
+
+    private static func composeUserMessage(
+        goal: String,
+        ambientContext: AmbientEditorContext?,
+        workspaceRoot: String?
+    ) -> String {
+        guard let ambientContext,
+              let block = ambientContext
+                .scoped(for: .promptAssembly, influenceLevel: .minimal)
+                .promptInjectionBlock(workspaceRoot: workspaceRoot) else {
+            return goal
+        }
+
+        return """
+        \(block)
+
+        \(goal)
+        """
     }
 
     static func statusMessage(forToolNamed name: String) -> String {
@@ -1021,6 +1048,7 @@ final class PipelineRunOrchestrator {
         conversationHistory: [ConversationHistoryTurn],
         latencyRunID: String?,
         planContext: String? = nil,
+        ambientContext: AmbientEditorContext? = nil,
         dagAssessment: TaskComplexityAnalyzer.ComplexityAssessment? = nil,
         deterministicPlan: StreamPlan? = nil,
         taskPlan: TaskPlan? = nil
@@ -1031,24 +1059,29 @@ final class PipelineRunOrchestrator {
         runner.compactionCoordinator.configureForModel(selectedModel)
         runner.compactionCoordinator.setPipelineActive(true)
         runner.sessionInspector.observeLive(tracer)
+        var sessionAttributes: [String: String] = [
+            "model": selectedModel.identifier,
+            "provider": selectedModel.provider.rawValue,
+            "goal": String(goal.prefix(200)),
+            "model.role": selectedModel.role.rawValue,
+            "routing.reason": routingDecision.reason,
+            "routing.strategy": routingDecision.strategy.rawValue,
+            "routing.signals": routingDecision.matchedSignals.joined(separator: ","),
+            "routing.capabilities_required": routingDecision.capabilitiesRequired.map { $0.map(\.rawValue).sorted().joined(separator: ",") } ?? "",
+            "routing.candidates": routingDecision.candidateRoles.map { $0.map(\.rawValue).joined(separator: ",") } ?? "",
+            "task.attachment_count": String(attachments.count),
+            "task.history_turns": String(conversationHistory.count),
+            "policy.scope": runtimePolicy.accessScope.rawValue,
+            "policy.approval": runtimePolicy.approvalMode.rawValue
+        ]
+        if let ambientContext {
+            sessionAttributes.merge(ambientContext.traceAttributes) { _, new in new }
+        }
+
         let sessionSpanID = await tracer.begin(
             kind: .session,
             name: "agentic_loop",
-            attributes: [
-                "model": selectedModel.identifier,
-                "provider": selectedModel.provider.rawValue,
-                "goal": String(goal.prefix(200)),
-                "model.role": selectedModel.role.rawValue,
-                "routing.reason": routingDecision.reason,
-                "routing.strategy": routingDecision.strategy.rawValue,
-                "routing.signals": routingDecision.matchedSignals.joined(separator: ","),
-                "routing.capabilities_required": routingDecision.capabilitiesRequired.map { $0.map(\.rawValue).sorted().joined(separator: ",") } ?? "",
-                "routing.candidates": routingDecision.candidateRoles.map { $0.map(\.rawValue).joined(separator: ",") } ?? "",
-                "task.attachment_count": String(attachments.count),
-                "task.history_turns": String(conversationHistory.count),
-                "policy.scope": runtimePolicy.accessScope.rawValue,
-                "policy.approval": runtimePolicy.approvalMode.rawValue
-            ]
+            attributes: sessionAttributes
         )
         runner.activeSessionSpanID = sessionSpanID
 
@@ -1079,7 +1112,9 @@ final class PipelineRunOrchestrator {
             openAIKey: openAIKey,
             runtimePolicy: runtimePolicy,
             permissionPolicy: runtimePolicy.permissionPolicy,
-            allowMachineWideAccess: runtimePolicy.allowsMachineWideAccess
+            allowMachineWideAccess: runtimePolicy.allowsMachineWideAccess,
+            ambientContextSnapshot: ambientContext?.scoped(for: .toolDispatch, influenceLevel: .minimal),
+            ambientContextCoordinator: runner.workspaceAmbientContext
         )
         await client.recovery.setTracer(tracer)
         await client.recovery.resetCircuitBreaker()
@@ -1167,7 +1202,9 @@ final class PipelineRunOrchestrator {
         let promptAssemblyStartedAt = CFAbsoluteTimeGetCurrent()
         let preparedInput = await PipelineMemoryPackStager.prepareAgenticUserInput(
             goal: goal,
-            attachments: attachments
+            attachments: attachments,
+            ambientContext: ambientContext,
+            workspaceRoot: runner.packageRoot
         )
         let requestProfile = PipelineMemoryPackStager.agenticRequestProfile(
             for: goal,
@@ -1228,7 +1265,8 @@ final class PipelineRunOrchestrator {
                 tracer: tracer,
                 sessionSpanID: sessionSpanID,
                 latencyRunID: latencyRunID,
-                goal: goal
+                goal: goal,
+                ambientContext: ambientContext
             )
             return
         }
@@ -1615,12 +1653,14 @@ final class PipelineRunOrchestrator {
         tracer: TraceCollector,
         sessionSpanID: UUID,
         latencyRunID: String?,
-        goal: String
+        goal: String,
+        ambientContext: AmbientEditorContext?
     ) async {
         let executor = TaskPlanExecutor(
             plan: taskPlan,
             tracer: tracer,
-            parentSpanID: sessionSpanID
+            parentSpanID: sessionSpanID,
+            ambientContext: ambientContext?.scoped(for: .taskPlanning, influenceLevel: .standard)
         )
 
         // Accumulates conversation turns across steps so later steps see earlier work.

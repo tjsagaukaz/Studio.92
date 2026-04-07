@@ -16,6 +16,7 @@ DerivedData/
 
 .studio92/sessions/
 .studio92/worktrees/
+.studio92/index/
 
 # Credentials & secrets
 .env

@@ -15,6 +15,7 @@ final class WorkspaceCoordinator {
     var selectedProjectID: UUID?
     var selectedEpochID: UUID?
     var recentWorkspacePaths: [String] = []
+    let ambientContext: AmbientEditorContextCoordinator
 
     // MARK: - Shared References
 
@@ -33,6 +34,22 @@ final class WorkspaceCoordinator {
     init(runner: PipelineRunner, repositoryMonitor: RepositoryMonitor) {
         self.runner = runner
         self.repositoryMonitor = repositoryMonitor
+        self.ambientContext = AmbientEditorContextCoordinator(workspaceURL: repositoryMonitor.workspaceURL)
+        self.runner.workspaceAmbientContext = ambientContext
+
+        repositoryMonitor.onRelevantWorkspacePathsChanged = { [weak self] paths in
+            Task { @MainActor in
+                self?.ambientContext.noteRecentWorkspaceEdits(paths)
+            }
+        }
+
+        repositoryMonitor.onRepositoryStateChanged = { [weak self] state in
+            Task { @MainActor in
+                self?.ambientContext.noteGitState(state)
+            }
+        }
+
+        ambientContext.noteGitState(repositoryMonitor.repositoryState)
     }
 
     func configure(
@@ -109,6 +126,7 @@ final class WorkspaceCoordinator {
         rememberWorkspace(path: normalizedURL.path)
         await runner.updatePackageRoot(normalizedURL.path)
         repositoryMonitor.updateWorkspace(normalizedURL)
+        ambientContext.updateWorkspaceRoot(normalizedURL)
         threads?.jobMonitor.updateWorkspace(normalizedURL)
         templateEngine?.updateWorkspace(normalizedURL.path)
         threads?.goalText = ""

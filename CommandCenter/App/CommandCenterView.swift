@@ -190,6 +190,7 @@ struct CommandCenterView: View {
     @State private var viewportModel = ViewportStreamModel()
     private let simulatorPreviewService = SimulatorPreviewService.shared
     @State private var templateEngine: SessionTemplateEngine
+    @State private var semanticIndexWarmup: SemanticIndexWarmupController
     /// Git anchor registry: id → ActionAnchor. Lives only in memory; Git refs survive crashes.
     @State private var anchorRegistry: [UUID: ActionAnchor] = [:]
     private let gitService = GitService()
@@ -216,6 +217,7 @@ struct CommandCenterView: View {
             jobMonitor: jobMonitor,
             repositoryMonitor: repoMonitor
         )
+        let semanticWarmup = SemanticIndexWarmupController(repositoryMonitor: repoMonitor)
         ws.threads = tc
         tc.workspace = ws
 
@@ -223,6 +225,7 @@ struct CommandCenterView: View {
         _threads = State(initialValue: tc)
         _conversationStore = StateObject(wrappedValue: store)
         _templateEngine = State(initialValue: SessionTemplateEngine(workspacePath: packageRoot))
+        _semanticIndexWarmup = State(initialValue: semanticWarmup)
     }
 
     private var sidebarContent: some View {
@@ -277,6 +280,7 @@ struct CommandCenterView: View {
                 set: { threads.composerAttachments = $0 }
             ),
             viewportModel: viewportModel,
+            ambientContext: workspace.ambientContext,
             onSubmit: { threads.submitGoal(modelContext: modelContext) },
             onSelectSession: threads.selectSession,
             onSelectProject: workspace.selectProject,
@@ -510,6 +514,7 @@ struct CommandCenterView: View {
             workspace.engine.load(from: modelContext)
             threads.initializePersistence(modelContext: modelContext)
             workspace.repositoryMonitor.start()
+            semanticIndexWarmup.start()
             threads.jobMonitor.start()
             templateEngine.start()
             simulatorPreviewService.start()
@@ -534,6 +539,7 @@ struct CommandCenterView: View {
         }
         .onDisappear {
             threads.persistCurrentThread()
+            semanticIndexWarmup.stop()
             workspace.repositoryMonitor.stop()
             threads.jobMonitor.stop()
             templateEngine.stop()

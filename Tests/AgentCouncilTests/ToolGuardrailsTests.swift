@@ -11,7 +11,7 @@ final class ToolGuardrailsTests: XCTestCase {
 
     func testAllToolsAllowed() {
         let policy = ToolPermissionPolicy()
-        for tool in ["file_write", "file_patch", "terminal", "deploy_to_testflight", "delegate_to_worktree", "file_read", "list_files", "web_search"] {
+        for tool in ["file_write", "file_patch", "terminal", "deploy_to_testflight", "delegate_to_worktree", "file_read", "list_files", "grep_search", "semantic_search", "find_symbol", "find_usages", "web_search"] {
             XCTAssertEqual(policy.check(tool), .allowed, "\(tool) should be allowed")
         }
     }

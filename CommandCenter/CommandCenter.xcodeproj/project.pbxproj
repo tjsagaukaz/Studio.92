@@ -61,6 +61,7 @@
 		9A94FA709564CFFBF6B6602B /* StudioAutomationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 800F05E44E29E13A73C04DB3 /* StudioAutomationEngine.swift */; };
 		A1BD1A9F0001000000000001 /* BuildDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BD1A9F0002000000000001 /* BuildDiagnostics.swift */; };
 		A1BD1A9F0001000000000002 /* MultimodalEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BD1A9F0002000000000002 /* MultimodalEngine.swift */; };
+		A1F0C0E10001000000000003 /* AmbientEditorContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F0C0E10002000000000003 /* AmbientEditorContext.swift */; };
 		A1EE27EFEDE3DE059AFCAC9D /* TraceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23CA90F11D465BF248E19EC4 /* TraceStore.swift */; };
 		A3B4C5D6E7F8A9B0C1D2E3F4 /* AnthropicExecutionLoop.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4C5D6E7F8A9B0C1D2E3F4A5 /* AnthropicExecutionLoop.swift */; };
 		A5678CD7A641F6B718855AAE /* SessionInspectorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A2061CBABA9A00BF6A13C1E /* SessionInspectorView.swift */; };
@@ -155,6 +156,7 @@
 		A1B2C3D4E5F6A7B8C9D0E1F2 /* ConversationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationStore.swift; sourceTree = "<group>"; };
 		A1BD1A9F0002000000000001 /* BuildDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildDiagnostics.swift; sourceTree = "<group>"; };
 		A1BD1A9F0002000000000002 /* MultimodalEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultimodalEngine.swift; sourceTree = "<group>"; };
+		A1F0C0E10002000000000003 /* AmbientEditorContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AmbientEditorContext.swift; sourceTree = "<group>"; };
 		A4BAFF4AA60D144041CADF0F /* Geist-Medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Resources/Geist-Medium.ttf"; sourceTree = "<group>"; };
 		A6971168576E76EDF3F9DA4B /* MockSSEServer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MockSSEServer.swift; sourceTree = "<group>"; };
 		C2B3A4F5E6D7C8B9A0F1E2D3 /* AuditFixTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AuditFixTests.swift; sourceTree = "<group>"; };
@@ -402,6 +404,7 @@
 		B9D2F3E925FA11C7AC617AB1 /* Workspace */ = {
 			isa = PBXGroup;
 			children = (
+				A1F0C0E10002000000000003 /* AmbientEditorContext.swift */,
 				ED7F5373E011CAB91D057AEF /* DeploymentCoordinator.swift */,
 				C0EC4069E32705F6D442C25D /* FactoryObserver.swift */,
 				B1E6F411FA149895B47F9BE9 /* GitFoundation.swift */,
@@ -612,6 +615,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CC271EC62BD32BB4CE5320D9 /* AGENTSParser.swift in Sources */,
+				A1F0C0E10001000000000003 /* AmbientEditorContext.swift in Sources */,
 				4FF1284C2B64F0A0C9CB347B /* AgenticBridge.swift in Sources */,
 				26B3F201225767B9FE58C4EB /* AgenticBridgeTypes.swift in Sources */,
 				8CFE538E1BAF16C5C498A882 /* ToolDispatch.swift in Sources */,

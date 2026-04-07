@@ -1,4 +1,5 @@
 import AppKit
+import AgentCouncil
 import Foundation
 import Observation
 
@@ -9,6 +10,8 @@ final class RepositoryMonitor {
     var workspaceURL: URL
     var repositoryState: GitRepositoryState
     var isRefreshing = false
+    var onRelevantWorkspacePathsChanged: (@Sendable ([String]) -> Void)?
+    var onRepositoryStateChanged: (@Sendable (GitRepositoryState) -> Void)?
 
     @ObservationIgnored private let gitService = GitService()
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
@@ -91,6 +94,7 @@ final class RepositoryMonitor {
     private func apply(_ state: GitRepositoryState) {
         repositoryState = state
         configureWatchers(for: state)
+        onRepositoryStateChanged?(state)
     }
 
     private func configureWatchers(for state: GitRepositoryState) {
@@ -184,12 +188,13 @@ final class RepositoryMonitor {
             "/ModuleCache.noindex/"
         ]
 
-        let shouldRefresh = paths.contains { rawPath in
+        let relevantPaths = paths.compactMap { rawPath -> String? in
             let normalized = URL(fileURLWithPath: rawPath).standardizedFileURL.path
-            return !ignoredFragments.contains(where: normalized.contains)
+            return ignoredFragments.contains(where: normalized.contains) ? nil : normalized
         }
 
-        guard shouldRefresh else { return }
+        guard !relevantPaths.isEmpty else { return }
+        onRelevantWorkspacePathsChanged?(Array(Set(relevantPaths)).sorted())
         scheduleRefresh(immediate: false)
     }
 
@@ -275,6 +280,46 @@ final class RepositoryMonitor {
         notificationTokens.forEach { token in
             NotificationCenter.default.removeObserver(token)
             NSWorkspace.shared.notificationCenter.removeObserver(token)
+        }
+    }
+}
+
+@MainActor
+final class SemanticIndexWarmupController {
+
+    private let repositoryMonitor: RepositoryMonitor
+    private var warmupTask: Task<Void, Never>?
+
+    init(repositoryMonitor: RepositoryMonitor) {
+        self.repositoryMonitor = repositoryMonitor
+    }
+
+    func start() {
+        repositoryMonitor.onRelevantWorkspacePathsChanged = { [weak self] paths in
+            Task { @MainActor [weak self] in
+                self?.scheduleRefresh(for: paths)
+            }
+        }
+
+        warmupTask?.cancel()
+        let workspaceURL = repositoryMonitor.workspaceURL
+        warmupTask = Task {
+            try? await SemanticSearchIndex(projectRoot: workspaceURL).refresh()
+        }
+    }
+
+    func stop() {
+        repositoryMonitor.onRelevantWorkspacePathsChanged = nil
+        warmupTask?.cancel()
+        warmupTask = nil
+    }
+
+    private func scheduleRefresh(for paths: [String]) {
+        warmupTask?.cancel()
+        let workspaceURL = repositoryMonitor.workspaceURL
+        warmupTask = Task {
+            let urls = paths.map { URL(fileURLWithPath: $0) }
+            try? await SemanticSearchIndex(projectRoot: workspaceURL).refresh(paths: urls)
         }
     }
 }

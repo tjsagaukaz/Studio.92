@@ -13,6 +13,7 @@ struct WorkspaceShellView: View {
     @Binding var goalText: String
     @Binding var attachments: [ChatAttachment]
     let viewportModel: ViewportStreamModel
+    let ambientContext: AmbientEditorContextCoordinator
     let onSubmit: () -> Void
     let onSelectSession: (UUID) -> Void
     let onSelectProject: (UUID) -> Void
@@ -100,6 +101,7 @@ struct WorkspaceShellView: View {
 
                 ViewportPaneView(
                     model: viewportModel,
+                    ambientContext: ambientContext,
                     previewService: simulatorPreviewService,
                     onHide: { withAnimation(StudioMotion.panelSpring) { isViewportVisible = false } },
                     onAuthorizeApproval: onAuthorizeApproval ?? { commandApproval.approve() },

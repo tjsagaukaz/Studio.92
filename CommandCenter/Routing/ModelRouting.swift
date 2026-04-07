@@ -131,6 +131,8 @@ enum TaskCapability: String, CaseIterable, Codable, Sendable {
     case buildRepair
     case research
     case review
+    case semanticRetrieval
+    case symbolRefactor
 }
 
 // MARK: - Model Cost Profiles (Phase 3)
@@ -164,35 +166,35 @@ extension StudioModelStrategy {
             costPerMInputTokens: 0.80,
             costPerMOutputTokens: 4.0,
             latencyP50Ms: 300,
-            capabilities: [.research, .speed]
+            capabilities: [.research, .speed, .semanticRetrieval, .symbolRefactor]
         ),
         .subagent: ModelCostProfile(
             role: .subagent,
             costPerMInputTokens: 1.50,
             costPerMOutputTokens: 6.0,
             latencyP50Ms: 400,
-            capabilities: [.codeGeneration, .speed, .buildRepair, .research]
+            capabilities: [.codeGeneration, .speed, .buildRepair, .research, .semanticRetrieval, .symbolRefactor]
         ),
         .review: ModelCostProfile(
             role: .review,
             costPerMInputTokens: 3.0,
             costPerMOutputTokens: 15.0,
             latencyP50Ms: 600,
-            capabilities: [.codeGeneration, .reasoning, .multifileEdit, .review, .research]
+            capabilities: [.codeGeneration, .reasoning, .multifileEdit, .review, .research, .semanticRetrieval, .symbolRefactor]
         ),
         .fullSend: ModelCostProfile(
             role: .fullSend,
             costPerMInputTokens: 3.0,
             costPerMOutputTokens: 15.0,
             latencyP50Ms: 600,
-            capabilities: [.codeGeneration, .reasoning, .multifileEdit, .buildRepair, .research]
+            capabilities: [.codeGeneration, .reasoning, .multifileEdit, .buildRepair, .research, .semanticRetrieval, .symbolRefactor]
         ),
         .escalation: ModelCostProfile(
             role: .escalation,
             costPerMInputTokens: 15.0,
             costPerMOutputTokens: 75.0,
             latencyP50Ms: 1200,
-            capabilities: [.codeGeneration, .reasoning, .multifileEdit, .buildRepair, .review, .research]
+            capabilities: [.codeGeneration, .reasoning, .multifileEdit, .buildRepair, .review, .research, .semanticRetrieval, .symbolRefactor]
         ),
     ]
 }
@@ -588,6 +590,36 @@ enum StudioModelStrategy {
         "untangle",
     ]
 
+    private static let deicticFocusSignals = [
+        "this",
+        "selected",
+        "selection",
+        "under cursor",
+        "current file",
+        "here",
+    ]
+
+    private static let fixIntentSignals = [
+        "fix",
+        "debug",
+        "resolve",
+        "repair",
+        "why is",
+        "what's wrong",
+        "what is wrong",
+        "error",
+        "warning",
+        "diagnostic",
+    ]
+
+    private static let recentEditReviewSignals = [
+        "recent changes",
+        "recent edits",
+        "what changed",
+        "check my changes",
+        "review my changes",
+    ]
+
     // MARK: - Routing Context
 
     /// Captures pipeline state at the moment of routing so the decision layer
@@ -614,6 +646,7 @@ enum StudioModelStrategy {
 
         // Phase 3 — capability requirements from TaskStep
         let requiredCapabilities: Set<TaskCapability>?
+        let ambientContext: AmbientEditorContext?
 
         init(
             goal: String,
@@ -626,7 +659,8 @@ enum StudioModelStrategy {
             dagPhase: TaskPhase? = nil,
             dagStepIndex: Int? = nil,
             dagTotalSteps: Int? = nil,
-            requiredCapabilities: Set<TaskCapability>? = nil
+            requiredCapabilities: Set<TaskCapability>? = nil,
+            ambientContext: AmbientEditorContext? = nil
         ) {
             self.goal = goal
             self.packageRoot = packageRoot
@@ -639,6 +673,7 @@ enum StudioModelStrategy {
             self.dagStepIndex = dagStepIndex
             self.dagTotalSteps = dagTotalSteps
             self.requiredCapabilities = requiredCapabilities
+            self.ambientContext = ambientContext
         }
 
         /// Whether the user is retrying the same failed goal.
@@ -749,7 +784,12 @@ enum StudioModelStrategy {
         if let required = context.requiredCapabilities, !required.isEmpty {
             let candidates = costProfiles
                 .filter { $0.value.satisfies(required) }
-                .sorted { $0.value.costPerMInputTokens < $1.value.costPerMInputTokens }
+                .sorted {
+                    if $0.value.costPerMInputTokens != $1.value.costPerMInputTokens {
+                        return $0.value.costPerMInputTokens < $1.value.costPerMInputTokens
+                    }
+                    return $0.key.rawValue < $1.key.rawValue
+                }
             let candidateRoles = candidates.map(\.key)
 
             if let cheapest = candidates.first {
@@ -798,7 +838,47 @@ enum StudioModelStrategy {
             )
         }
 
-        // 8. Default → fullSend.
+        // 8. Ambient editor focus — deterministic and scoped.
+        let requestsEditorFocus = deicticFocusSignals.contains { normalized.contains($0) }
+        if let ambient = context.ambientContext {
+            if let conflict = ambient.conflict, requestsEditorFocus {
+                let signals = conflict.conflictingPaths.map { "conflict:\($0)" }
+                return RoutingDecision(
+                    model: descriptor(for: .fullSend, packageRoot: packageRoot),
+                    reason: "ambient_context_conflict",
+                    matchedSignals: signals,
+                    strategy: .intentSignal
+                )
+            }
+
+            if ambient.hasFreshSelection, requestsEditorFocus {
+                return RoutingDecision(
+                    model: descriptor(for: .fullSend, packageRoot: packageRoot),
+                    reason: "ambient_selection_focus",
+                    matchedSignals: ["selection"]
+                )
+            }
+
+            if ambient.diagnostics.errorCount > 0,
+               fixIntentSignals.contains(where: { normalized.contains($0) }) {
+                return RoutingDecision(
+                    model: descriptor(for: .fullSend, packageRoot: packageRoot),
+                    reason: "ambient_diagnostics_focus",
+                    matchedSignals: ["diagnostics:\(ambient.diagnostics.errorCount)"]
+                )
+            }
+
+            if !ambient.recentEdits.isEmpty,
+               recentEditReviewSignals.contains(where: { normalized.contains($0) }) {
+                return RoutingDecision(
+                    model: descriptor(for: .review, packageRoot: packageRoot),
+                    reason: "ambient_recent_edits_review",
+                    matchedSignals: ["recent_edits:\(ambient.recentEdits.count)"]
+                )
+            }
+        }
+
+        // 9. Default → fullSend.
         return RoutingDecision(
             model: descriptor(for: .fullSend, packageRoot: packageRoot),
             reason: "default",

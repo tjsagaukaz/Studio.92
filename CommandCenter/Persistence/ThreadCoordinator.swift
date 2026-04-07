@@ -243,6 +243,7 @@ final class ThreadCoordinator {
         goalText = ""
         composerAttachments = []
         guard let workspace else { return }
+        let ambientContextSnapshot = workspace.ambientContext.executionSnapshot()
         viewportModel.resetToAutomatic(selectedEpoch: workspace.selectedEpoch, previewService: simulatorPreviewService)
 
         let apiKey = StudioCredentialStore.load(key: "anthropicAPIKey")
@@ -300,6 +301,7 @@ final class ThreadCoordinator {
                 goal: goal,
                 displayGoal: displayGoal,
                 attachments: attachments,
+                ambientContextSnapshot: ambientContextSnapshot,
                 apiKey: apiKey,
                 openAIKey: openAIKey,
                 latencyRunID: latencyRunID

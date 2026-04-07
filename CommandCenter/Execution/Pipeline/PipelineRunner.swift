@@ -101,9 +101,34 @@ final class PipelineRunner {
     var pendingBBoxOverlays: [NormalizedBBox] = []
     /// Source image URL for the bbox overlays.
     var pendingBBoxSourceImageURL: URL?
+    private(set) var activeAmbientContext: AmbientEditorContext?
+    weak var workspaceAmbientContext: AmbientEditorContextCoordinator?
 
     init(packageRoot: String) {
         self.packageRoot = packageRoot
+    }
+
+    private static func ambientContextNotes(
+        context: AmbientEditorContext?,
+        focus: AmbientContextFocus?,
+        prefixes: [String]
+    ) -> String {
+        var components = prefixes
+
+        if let context {
+            components.append("ambient_context_id=\(context.contextID.uuidString)")
+            components.append("selection_freshness_ms=\(context.selectionFreshnessMs.map(String.init) ?? "none")")
+            components.append("fresh_selection=\(context.hasFreshSelection ? "true" : "false")")
+        } else {
+            components.append("ambient_context_id=none")
+        }
+
+        if let focus {
+            components.append("focus_source=\(focus.source.rawValue)")
+            components.append("focus_path=\(focus.path)")
+        }
+
+        return components.joined(separator: " ")
     }
 
     @MainActor
@@ -134,6 +159,7 @@ final class PipelineRunner {
         currentPacketID = nil
         emittedNarrativeKeys = []
         currentRunNarrativeCount = 0
+        activeAmbientContext = nil
         chatThread = ChatThread()
         activeLatencyRunID = nil
         stopElapsedTimer()
@@ -147,6 +173,7 @@ final class PipelineRunner {
         goal: String,
         displayGoal: String? = nil,
         attachments: [ChatAttachment] = [],
+        ambientContextSnapshot: AmbientEditorContext? = nil,
         apiKey: String? = nil,
         openAIKey: String? = nil,
         latencyRunID: String? = nil
@@ -164,6 +191,7 @@ final class PipelineRunner {
         let conversationHistory = chatThread.completedTurns
         let resolvedAnthropicKey = StudioModelStrategy.credential(provider: .anthropic, storedValue: apiKey)
         let resolvedOpenAIKey = StudioModelStrategy.credential(provider: .openAI, storedValue: openAIKey)
+        activeAmbientContext = ambientContextSnapshot
 
         // Track consecutive failures for DAG escalation and routing context.
         let failureCount: Int
@@ -174,6 +202,8 @@ final class PipelineRunner {
         }
 
         // Model selection: manual pin > context-aware routing > keyword routing > default
+        let routingAmbientContext = ambientContextSnapshot?.scoped(for: .modelRouting, influenceLevel: .standard)
+        let routingStartedAt = CFAbsoluteTimeGetCurrent()
         let routing: StudioModelStrategy.RoutingDecision
         if let pinned = pinnedModelIdentifier {
             let pinnedDescriptor = StudioModelStrategy.descriptorForIdentifier(pinned, packageRoot: packageRoot)
@@ -190,10 +220,27 @@ final class PipelineRunner {
                 lastFailedGoal: lastFailedGoal,
                 conversationTurnCount: conversationHistory.count,
                 attachmentCount: attachments.count,
-                contextPressure: compactionCoordinator.contextPressure
+                contextPressure: compactionCoordinator.contextPressure,
+                ambientContext: routingAmbientContext
             )
             routing = StudioModelStrategy.routingDecision(context: routingContext)
         }
+        let routingEndedAt = CFAbsoluteTimeGetCurrent()
+        await LatencyDiagnostics.shared.recordStage(
+            runID: resolvedLatencyRunID,
+            name: "Routing Decision",
+            startedAt: routingStartedAt,
+            endedAt: routingEndedAt,
+            notes: Self.ambientContextNotes(
+                context: routingAmbientContext,
+                focus: routingAmbientContext?.routingFocus(),
+                prefixes: [
+                    "reason=\(routing.reason)",
+                    "strategy=\(routing.strategy.rawValue)",
+                    "signals=\(routing.matchedSignals.joined(separator: ","))"
+                ]
+            )
+        )
         let selectedModel = routing.model
         activeModelName = selectedModel.shortName
         primaryModelName = selectedModel.shortName
@@ -210,11 +257,21 @@ final class PipelineRunner {
         let planContext: String?
         let deterministicPlan: StreamPlan?
         let taskPlan: TaskPlan?
+        let planningAmbientContext = ambientContextSnapshot?.scoped(for: .taskPlanning, influenceLevel: .standard)
+        let planningStartedAt = CFAbsoluteTimeGetCurrent()
         if complexity.shouldUseDAG {
-            let plan = TaskPlanGenerator.generate(goal: goal, assessment: complexity)
+            let plan = TaskPlanGenerator.generate(
+                goal: goal,
+                assessment: complexity,
+                ambientContext: planningAmbientContext
+            )
             taskPlan = plan
             if let firstStep = plan.steps.first {
-                planContext = TaskPlanPromptInjection.promptSupplement(for: plan, currentStep: firstStep)
+                planContext = TaskPlanPromptInjection.promptSupplement(
+                    for: plan,
+                    currentStep: firstStep,
+                    ambientContext: planningAmbientContext
+                )
             } else {
                 planContext = nil
             }
@@ -224,6 +281,21 @@ final class PipelineRunner {
             deterministicPlan = nil
             taskPlan = nil
         }
+        let planningEndedAt = CFAbsoluteTimeGetCurrent()
+        await LatencyDiagnostics.shared.recordStage(
+            runID: resolvedLatencyRunID,
+            name: "Task Plan Generation",
+            startedAt: planningStartedAt,
+            endedAt: planningEndedAt,
+            notes: Self.ambientContextNotes(
+                context: planningAmbientContext,
+                focus: planningAmbientContext?.planningFocus(),
+                prefixes: [
+                    "dag=\(complexity.shouldUseDAG ? "true" : "false")",
+                    "steps=\(taskPlan?.steps.count ?? 0)"
+                ]
+            )
+        )
 
         // Save to history
         goalHistory.removeAll { $0 == historyValue }
@@ -351,6 +423,7 @@ final class PipelineRunner {
                     conversationHistory: conversationHistory,
                     latencyRunID: resolvedLatencyRunID,
                     planContext: planContext,
+                    ambientContext: ambientContextSnapshot,
                     dagAssessment: complexity,
                     deterministicPlan: deterministicPlan,
                     taskPlan: taskPlan
@@ -820,6 +893,7 @@ final class PipelineRunner {
         conversationHistory: [ConversationHistoryTurn],
         latencyRunID: String?,
         planContext: String? = nil,
+        ambientContext: AmbientEditorContext? = nil,
         dagAssessment: TaskComplexityAnalyzer.ComplexityAssessment? = nil,
         deterministicPlan: StreamPlan? = nil,
         taskPlan: TaskPlan? = nil
@@ -835,6 +909,7 @@ final class PipelineRunner {
             conversationHistory: conversationHistory,
             latencyRunID: latencyRunID,
             planContext: planContext,
+            ambientContext: ambientContext,
             dagAssessment: dagAssessment,
             deterministicPlan: deterministicPlan,
             taskPlan: taskPlan

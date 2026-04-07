@@ -2183,7 +2183,7 @@ struct StreamingAssistantMessageRow: View {
             return .fileWrite
         case "file_patch", "apply_patch":
             return .filePatch
-        case "list_files", "list_dir", "file_search", "grep_search", "semantic_search":
+        case "list_files", "list_dir", "file_search", "grep_search", "semantic_search", "find_symbol", "find_usages":
             return .listFiles
         case "web_search":
             return .webSearch

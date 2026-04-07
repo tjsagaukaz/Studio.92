@@ -68,7 +68,7 @@ enum TaskPhase: String, Equatable, Sendable {
     var defaultCapabilities: Set<TaskCapability> {
         switch self {
         case .discovery:      return [.research, .speed]
-        case .analysis:       return [.reasoning, .research]
+        case .analysis:       return [.reasoning, .research, .semanticRetrieval, .symbolRefactor]
         case .implementation: return [.codeGeneration, .multifileEdit]
         case .verification:   return [.review]
         case .repair:         return [.buildRepair]
@@ -354,7 +354,8 @@ enum TaskPlanGenerator {
 
     static func generate(
         goal: String,
-        assessment: TaskComplexityAnalyzer.ComplexityAssessment
+        assessment: TaskComplexityAnalyzer.ComplexityAssessment,
+        ambientContext: AmbientEditorContext? = nil
     ) -> TaskPlan {
         let phases = assessment.suggestedPhases
         var steps: [TaskStep] = []
@@ -364,7 +365,7 @@ enum TaskPlanGenerator {
             let stepID = "step-\(phaseIndex)"
             let step = TaskStep(
                 id: stepID,
-                intent: intentDescription(for: phase, goal: goal),
+                intent: intentDescription(for: phase, goal: goal, ambientContext: ambientContext),
                 phase: phase,
                 toolHint: toolHint(for: phase),
                 canRunInParallel: phase == .discovery,
@@ -377,11 +378,27 @@ enum TaskPlanGenerator {
         return TaskPlan(goal: goal, steps: steps)
     }
 
-    private static func intentDescription(for phase: TaskPhase, goal: String) -> String {
+    private static func intentDescription(
+        for phase: TaskPhase,
+        goal: String,
+        ambientContext: AmbientEditorContext?
+    ) -> String {
+        let focusPath = ambientContext?.planningFocus().map { URL(fileURLWithPath: $0.path).lastPathComponent }
+        let openFileCount = ambientContext?.openFiles.files.count ?? 0
+
         switch phase {
         case .discovery:
+            if let focusPath {
+                return "Read and understand \(focusPath) and the immediate surrounding context"
+            }
+            if openFileCount > 1 {
+                return "Read and understand the currently open files and structure"
+            }
             return "Read and understand the relevant files and structure"
         case .analysis:
+            if let focusPath {
+                return "Analyze \(focusPath) and identify the required changes"
+            }
             return "Analyze the codebase and identify required changes"
         case .implementation:
             return "Implement the changes"
@@ -414,7 +431,8 @@ enum TaskPlanPromptInjection {
     /// Returns nil when no plan is active or for simple tasks.
     static func promptSupplement(
         for plan: TaskPlan,
-        currentStep: TaskStep
+        currentStep: TaskStep,
+        ambientContext: AmbientEditorContext? = nil
     ) -> String? {
         guard plan.status == .active else { return nil }
 
@@ -440,6 +458,10 @@ enum TaskPlanPromptInjection {
             supplement += """
 
             Analyze what needs to change. Identify files, functions, and patterns.
+            Prefer semantic_search for architectural or pattern-based lookups.
+            Prefer grep_search when you need an exact token, symbol, or literal match.
+            Prefer find_symbol when you need a canonical definition or USR-backed symbol identity.
+            Prefer find_usages when you need refactor-safe references, call sites, or cross-file impact analysis.
             Be specific about what you plan to modify.
             """
         case .implementation:
@@ -479,6 +501,35 @@ enum TaskPlanPromptInjection {
 
             Completed phases: \(phaseNames).
             """
+        }
+
+        if let ambientContext {
+            let scoped = ambientContext.scoped(for: .taskPlanning, influenceLevel: .standard)
+            if let currentFile = scoped.currentFile {
+                supplement += """
+
+            Active editor file: \(currentFile.path)
+            """
+            }
+            if let selectedRange = scoped.selectedRange {
+                supplement += """
+
+            Active selection: \(selectedRange.summary)
+            """
+            }
+            if !scoped.openFiles.files.isEmpty {
+                let openFiles = scoped.openFiles.files.prefix(5).map(\.path).joined(separator: ", ")
+                supplement += """
+
+            Open files: \(openFiles)
+            """
+            }
+            if let conflict = scoped.conflict {
+                supplement += """
+
+            Ambient context conflict: \(conflict.reason.rawValue). Do not infer a mutation target until the user disambiguates.
+            """
+            }
         }
 
         return supplement
@@ -623,12 +674,19 @@ actor TaskPlanExecutor {
     private var plan: TaskPlan
     private let tracer: TraceCollector
     private let parentSpanID: UUID
+    private let ambientContext: AmbientEditorContext?
     private var dagSpanID: UUID?
 
-    init(plan: TaskPlan, tracer: TraceCollector, parentSpanID: UUID) {
+    init(
+        plan: TaskPlan,
+        tracer: TraceCollector,
+        parentSpanID: UUID,
+        ambientContext: AmbientEditorContext? = nil
+    ) {
         self.plan = plan
         self.tracer = tracer
         self.parentSpanID = parentSpanID
+        self.ambientContext = ambientContext
     }
 
     /// Execute all steps in dependency order.
@@ -636,14 +694,19 @@ actor TaskPlanExecutor {
     func execute(
         runStep: @escaping @Sendable (TaskStep, String?) async -> StepResult
     ) async -> (outcome: ExecutionOutcome, plan: TaskPlan) {
+        var dagAttributes: [String: String] = [
+            "dag.step_count": "\(plan.steps.count)",
+            "dag.goal": String(plan.goal.prefix(200))
+        ]
+        if let ambientContext {
+            dagAttributes.merge(ambientContext.traceAttributes) { _, new in new }
+        }
+
         let spanID = await tracer.begin(
             kind: .session,
             name: "dag_orchestration",
             parentID: parentSpanID,
-            attributes: [
-                "dag.step_count": "\(plan.steps.count)",
-                "dag.goal": String(plan.goal.prefix(200))
-            ]
+            attributes: dagAttributes
         )
         dagSpanID = spanID
 
@@ -702,7 +765,7 @@ actor TaskPlanExecutor {
     /// Get the current prompt supplement for the active step.
     func promptSupplement(for stepID: String) -> String? {
         guard let step = plan.steps.first(where: { $0.id == stepID }) else { return nil }
-        return TaskPlanPromptInjection.promptSupplement(for: plan, currentStep: step)
+        return TaskPlanPromptInjection.promptSupplement(for: plan, currentStep: step, ambientContext: ambientContext)
     }
 
     /// Get the user-facing status for a step.
@@ -723,7 +786,7 @@ actor TaskPlanExecutor {
         runStep: @escaping @Sendable (TaskStep, String?) async -> StepResult
     ) async -> StepResult? {
         plan.markRunning(step.id)
-        let supplement = TaskPlanPromptInjection.promptSupplement(for: plan, currentStep: step)
+        let supplement = TaskPlanPromptInjection.promptSupplement(for: plan, currentStep: step, ambientContext: ambientContext)
 
         let stepSpanID = await tracer.begin(
             kind: .toolExecution,
@@ -756,7 +819,7 @@ actor TaskPlanExecutor {
                 // Re-run with retry context
                 let retryStep = plan.steps.first(where: { $0.id == step.id })!
                 plan.markRunning(step.id)
-                let retrySupplement = TaskPlanPromptInjection.promptSupplement(for: plan, currentStep: retryStep)
+                let retrySupplement = TaskPlanPromptInjection.promptSupplement(for: plan, currentStep: retryStep, ambientContext: ambientContext)
 
                 let retrySpanID = await tracer.begin(
                     kind: .retry,
@@ -809,7 +872,7 @@ actor TaskPlanExecutor {
         // Run all parallel steps concurrently
         await withTaskGroup(of: StepResult.self) { group in
             for step in steps {
-                let supplement = TaskPlanPromptInjection.promptSupplement(for: plan, currentStep: step)
+                let supplement = TaskPlanPromptInjection.promptSupplement(for: plan, currentStep: step, ambientContext: ambientContext)
                 group.addTask {
                     await runStep(step, supplement)
                 }

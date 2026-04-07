@@ -15,7 +15,8 @@ final class AgentCouncilTests: XCTestCase {
         )
 
         XCTAssertTrue(prompt.contains("web_search"))
-        XCTAssertTrue(prompt.contains("full autonomy"))
+        XCTAssertTrue(prompt.contains("broad autonomous authority"))
+        XCTAssertTrue(prompt.contains("Inspect the codebase before changing it."))
         XCTAssertTrue(prompt.contains("/tmp/studio92"))
         XCTAssertTrue(prompt.contains("1970-01-01T00:00:00Z"))
     }
@@ -27,6 +28,10 @@ final class AgentCouncilTests: XCTestCase {
         XCTAssertTrue(names.contains("file_write"))
         XCTAssertTrue(names.contains("file_patch"))
         XCTAssertTrue(names.contains("terminal"))
+        XCTAssertTrue(names.contains("grep_search"))
+        XCTAssertTrue(names.contains("semantic_search"))
+        XCTAssertTrue(names.contains("find_symbol"))
+        XCTAssertTrue(names.contains("find_usages"))
         XCTAssertTrue(names.contains("web_search"))
         XCTAssertTrue(names.contains("deploy_to_testflight"))
     }

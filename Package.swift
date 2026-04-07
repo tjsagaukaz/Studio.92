@@ -16,12 +16,19 @@ let package = Package(
         .executable(name: "executor",     targets: ["ExecutorCLI"])
     ],
     dependencies: [
-        .package(url: "https://github.com/teunlao/swift-ai-sdk.git", from: "0.17.6")
+        .package(url: "https://github.com/teunlao/swift-ai-sdk.git", from: "0.17.6"),
+        .package(url: "https://github.com/swiftlang/indexstore-db.git", branch: "main")
     ],
     targets: [
         .target(
             name: "AgentCouncil",
-            path: "Sources/AgentCouncil"
+            dependencies: [
+                .product(name: "IndexStoreDB", package: "indexstore-db")
+            ],
+            path: "Sources/AgentCouncil",
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
+            ]
         ),
         .executableTarget(
             name: "AgentCouncilCLI",

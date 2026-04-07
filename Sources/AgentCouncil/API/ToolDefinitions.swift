@@ -13,6 +13,10 @@ public enum ToolName: String, Sendable, CaseIterable, Hashable {
     case fileWrite           = "file_write"
     case filePatch           = "file_patch"
     case listFiles           = "list_files"
+    case grepSearch          = "grep_search"
+    case semanticSearch      = "semantic_search"
+    case findSymbol          = "find_symbol"
+    case findUsages          = "find_usages"
     case delegateToExplorer  = "delegate_to_explorer"
     case delegateToReviewer  = "delegate_to_reviewer"
     case terminal            = "terminal"
@@ -29,8 +33,11 @@ public enum ToolName: String, Sendable, CaseIterable, Hashable {
         case "read_file":                               self = .fileRead
         case "create_file", "write_file":               self = .fileWrite
         case "apply_patch":                             self = .filePatch
-        case "list_dir", "file_search",
-             "grep_search", "semantic_search":          self = .listFiles
+        case "list_dir", "file_search":               self = .listFiles
+        case "grep_search":                             self = .grepSearch
+        case "semantic_search":                         self = .semanticSearch
+        case "find_symbol":                            self = .findSymbol
+        case "find_usages":                            self = .findUsages
         case "fetch_webpage":                           self = .webSearch
         case "run_in_terminal":                         self = .terminal
         default:                                        return nil
@@ -38,7 +45,7 @@ public enum ToolName: String, Sendable, CaseIterable, Hashable {
     }
 
     /// Read-only, side-effect-free tools safe for concurrent execution.
-    public static let parallelizable: Set<ToolName> = [.fileRead, .listFiles, .webSearch]
+    public static let parallelizable: Set<ToolName> = [.fileRead, .listFiles, .grepSearch, .semanticSearch, .findSymbol, .findUsages, .webSearch]
 
     /// Tools that operate on a file path (extractable from input JSON).
     public static let filePathTools: Set<ToolName> = [.fileRead, .fileWrite, .filePatch]
@@ -52,6 +59,10 @@ public enum AgentTools {
         fileWrite,
         filePatch,
         listFiles,
+        grepSearch,
+        semanticSearch,
+        findSymbol,
+        findUsages,
         delegateToExplorer,
         delegateToReviewer,
         terminal,
@@ -125,6 +136,121 @@ public enum AgentTools {
             required: []
         ),
         strict: false
+    )
+
+    public static let grepSearch = ToolDefinition(
+        name: "grep_search",
+        description: "Run an exact workspace search against current on-disk files and return precise path, line, and column matches. Use this when you know a literal string or regex to search for and want deterministic, bounded results without reading whole files. This is safer than broad file reads because it returns only the matching lines and small local context.",
+        inputSchema: JSONSchema(
+            type: "object",
+            properties: [
+                "query": PropertySchema(type: "string", description: "Exact string or regex to search for."),
+                "is_regexp": PropertySchema(type: "boolean", description: "Interpret query as a regular expression. Defaults to false."),
+                "case_sensitive": PropertySchema(type: "boolean", description: "Use case-sensitive matching. Defaults to false."),
+                "path": PropertySchema(type: "string", description: "Optional file or directory path to search within."),
+                "paths": PropertySchema(
+                    type: "array",
+                    description: "Optional list of file or directory paths to search within.",
+                    items: SchemaItems(type: "string", description: "Absolute or project-relative path.")
+                ),
+                "max_results": PropertySchema(type: "integer", description: "Maximum number of matches to return. Defaults to 50, max 500."),
+                "context_lines": PropertySchema(type: "integer", description: "Number of context lines to include before and after each match. Defaults to 1, max 5.")
+            ],
+            required: ["query"]
+        ),
+        strict: false,
+        inputExamples: [
+            [
+                "query": .string("ExecutionLoopEngine"),
+                "path": .string("CommandCenter/Execution"),
+                "max_results": .int(25)
+            ]
+        ]
+    )
+
+    public static let semanticSearch = ToolDefinition(
+        name: "semantic_search",
+        description: "Run a structured semantic retrieval pass over the incrementally indexed workspace using SQLite FTS over declaration-aware Swift chunks. Use this when the query is conceptual, architectural, or pattern-based and exact token matching would miss relevant code. Results are deterministic and include ranked chunks with path, line range, summary, and snippet.",
+        inputSchema: JSONSchema(
+            type: "object",
+            properties: [
+                "query": PropertySchema(type: "string", description: "Conceptual or architectural search query."),
+                "path": PropertySchema(type: "string", description: "Optional file or directory path to constrain retrieval."),
+                "paths": PropertySchema(
+                    type: "array",
+                    description: "Optional list of file or directory paths to constrain retrieval.",
+                    items: SchemaItems(type: "string", description: "Absolute or project-relative path.")
+                ),
+                "max_results": PropertySchema(type: "integer", description: "Maximum number of ranked chunks to return. Defaults to 12, max 50.")
+            ],
+            required: ["query"]
+        ),
+        strict: false,
+        inputExamples: [
+            [
+                "query": .string("streaming pipeline orchestration"),
+                "path": .string("CommandCenter/Execution"),
+                "max_results": .int(8)
+            ]
+        ]
+    )
+
+    public static let findSymbol = ToolDefinition(
+        name: "find_symbol",
+        description: "Resolve indexed workspace symbols by semantic identity using IndexStoreDB canonical occurrences, then validate returned definitions with SourceKit. Use this when you need a real symbol definition rather than a text match. Results are deterministic, include USR, file, line, and column, and are constrained to workspace-owned source files.",
+        inputSchema: JSONSchema(
+            type: "object",
+            properties: [
+                "query": PropertySchema(type: "string", description: "Symbol name or name fragment to resolve."),
+                "path": PropertySchema(type: "string", description: "Optional file or directory path to constrain symbol resolution."),
+                "paths": PropertySchema(
+                    type: "array",
+                    description: "Optional list of file or directory paths to constrain symbol resolution.",
+                    items: SchemaItems(type: "string", description: "Absolute or project-relative path.")
+                ),
+                "max_results": PropertySchema(type: "integer", description: "Maximum number of symbols to return. Defaults to 12, max 50.")
+            ],
+            required: ["query"]
+        ),
+        strict: false,
+        inputExamples: [
+            [
+                "query": .string("RepositoryMonitor"),
+                "path": .string("CommandCenter/Workspace"),
+                "max_results": .int(5)
+            ]
+        ]
+    )
+
+    public static let findUsages = ToolDefinition(
+        name: "find_usages",
+        description: "Find semantic symbol occurrences using IndexStoreDB USRs. Resolve the symbol either from an explicit USR or from an exact file, line, and column validated by SourceKit prepare-rename. Use this for real cross-file usages and call sites, not text-based references.",
+        inputSchema: JSONSchema(
+            type: "object",
+            properties: [
+                "usr": PropertySchema(type: "string", description: "Optional Unified Symbol Resolution string. If omitted, path + line + column are required."),
+                "path": PropertySchema(type: "string", description: "File path containing the target symbol when resolving by location."),
+                "line": PropertySchema(type: "integer", description: "1-based line containing the target symbol when resolving by location."),
+                "column": PropertySchema(type: "integer", description: "1-based UTF-8 column containing the target symbol when resolving by location."),
+                "paths": PropertySchema(
+                    type: "array",
+                    description: "Optional list of file or directory paths to constrain returned usages.",
+                    items: SchemaItems(type: "string", description: "Absolute or project-relative path.")
+                ),
+                "include_definitions": PropertySchema(type: "boolean", description: "Include definitions and declarations in the returned occurrences. Defaults to true."),
+                "max_results": PropertySchema(type: "integer", description: "Maximum number of occurrences to return. Defaults to 200, max 500.")
+            ],
+            required: []
+        ),
+        strict: false,
+        inputExamples: [
+            [
+                "path": .string("CommandCenter/Workspace/RepositoryMonitor.swift"),
+                "line": .int(5),
+                "column": .int(13),
+                "max_results": .int(50)
+            ]
+        ]
     )
 
     public static let delegateToExplorer = ToolDefinition(

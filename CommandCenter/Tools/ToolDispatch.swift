@@ -126,6 +126,14 @@ extension AgenticClient {
         case .listFiles:
             let raw = executeListFiles(input)
             return ToolExecutionOutcome(text: raw.0, isError: raw.1)
+        case .grepSearch:
+            return await executeGrepSearch(input)
+        case .semanticSearch:
+            return await executeSemanticSearch(input)
+        case .findSymbol:
+            return await executeFindSymbol(input)
+        case .findUsages:
+            return await executeFindUsages(input)
         case .delegateToExplorer:
             return await executeDelegateToExplorer(input)
         case .delegateToReviewer:
@@ -190,11 +198,15 @@ extension AgenticClient {
         guard let tool = StudioToolName(normalizing: name) else { return [] }
         switch tool {
         case .fileRead, .fileWrite, .filePatch:
-            guard let path = input["path"] as? String else { return [] }
+            guard let path = resolvedPathInput(for: tool, input: input) else { return [] }
             return [sandbox.resolvedURL(for: path).path]
-        case .listFiles:
+        case .listFiles, .grepSearch, .semanticSearch, .findSymbol, .findUsages:
             if let path = input["path"] as? String, !path.isEmpty {
                 return [sandbox.resolvedURL(for: path).path]
+            }
+            let paths = stringArray(from: input["paths"])
+            if !paths.isEmpty {
+                return paths.map { sandbox.resolvedURL(for: $0).path }
             }
             return [projectRoot.path]
         default:
@@ -213,6 +225,10 @@ extension AgenticClient {
         case .fileWrite:             return "Write File"
         case .filePatch:             return "Patch File"
         case .fileRead:              return "Read File"
+        case .grepSearch:            return "Exact Search"
+        case .semanticSearch:        return "Semantic Search"
+        case .findSymbol:            return "Find Symbol"
+        case .findUsages:            return "Find Usages"
         case .listFiles:             return "List Files"
         default:                     return name.replacingOccurrences(of: "_", with: " ").capitalized
         }
@@ -231,7 +247,7 @@ extension AgenticClient {
             return "This will execute a shell command in the current workspace context."
         case .fileWrite, .filePatch:
             return "This will modify files in the current workspace."
-        case .fileRead, .listFiles:
+        case .fileRead, .listFiles, .grepSearch, .semanticSearch, .findSymbol, .findUsages:
             return "This will inspect files using the current access scope."
         default:
             return nil
@@ -259,6 +275,14 @@ extension AgenticClient {
         case .listFiles:
             let target = resolvedPaths.first ?? "the selected directory"
             return "Inspect the contents of \(target)."
+        case .grepSearch:
+            return "Search the workspace for exact on-disk matches without reading entire files."
+        case .semanticSearch:
+            return "Search the incrementally indexed workspace for conceptually related code chunks."
+        case .findSymbol:
+            return "Resolve indexed symbols by semantic identity and validate them with SourceKit."
+        case .findUsages:
+            return "Find real symbol occurrences across the workspace using IndexStoreDB and SourceKit-backed resolution."
         default:
             return "Run this tool action."
         }
@@ -291,6 +315,26 @@ extension AgenticClient {
             }
             return objective.isEmpty ? nil : String(objective.prefix(180))
         case .fileRead, .fileWrite, .filePatch, .listFiles:
+            return resolvedPaths.first
+        case .grepSearch:
+            if let query = (input["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty {
+                return "query: \(String(query.prefix(180)))"
+            }
+            return resolvedPaths.first
+        case .semanticSearch:
+            if let query = (input["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty {
+                return "query: \(String(query.prefix(180)))"
+            }
+            return resolvedPaths.first
+        case .findSymbol:
+            if let query = (input["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty {
+                return "query: \(String(query.prefix(180)))"
+            }
+            return resolvedPaths.first
+        case .findUsages:
+            if let usr = (input["usr"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !usr.isEmpty {
+                return "usr: \(String(usr.prefix(180)))"
+            }
             return resolvedPaths.first
         default:
             return nil
@@ -357,7 +401,9 @@ extension AgenticClient {
 
 
     func executeFileRead(_ input: [String: Any]) -> (String, Bool) {
-        guard let path = input["path"] as? String else { return ("Missing: path", true) }
+        guard let path = resolvedPathInput(for: .fileRead, input: input) else {
+            return ("Missing: path. file_read can infer the active file only when ambient editor context is available.", true)
+        }
         let url = sandbox.resolvedURL(for: path)
         guard sandbox.check(url) else { return ("Access denied: outside project directory", true) }
         guard FileManager.default.fileExists(atPath: url.path) else { return ("File not found: \(url.path)", true) }
@@ -370,7 +416,9 @@ extension AgenticClient {
 
     func executeFileWrite(_ input: [String: Any]) -> (String, Bool) {
         guard let path = input["path"] as? String,
-              let content = input["content"] as? String else { return ("Missing: path, content", true) }
+              let content = input["content"] as? String else {
+            return ("Missing: path, content. file_write cannot infer a mutation target from ambient editor context.", true)
+        }
         let url = sandbox.resolvedURL(for: path)
         guard sandbox.check(url) else { return ("Access denied: outside project directory", true) }
         let dir = url.deletingLastPathComponent()
@@ -387,7 +435,9 @@ extension AgenticClient {
     func executeFilePatch(_ input: [String: Any]) -> (String, Bool) {
         guard let path = input["path"] as? String,
               let oldString = input["old_string"] as? String,
-              let newString = input["new_string"] as? String else { return ("Missing: path, old_string, new_string", true) }
+              let newString = input["new_string"] as? String else {
+            return ("Missing: path, old_string, new_string. file_patch cannot infer a mutation target from ambient editor context.", true)
+        }
         let url = sandbox.resolvedURL(for: path)
         guard sandbox.check(url) else { return ("Access denied: outside project directory", true) }
         guard var content = try? String(contentsOf: url, encoding: .utf8) else { return ("Cannot read file", true) }
@@ -422,6 +472,223 @@ extension AgenticClient {
             return childIsDir.boolValue ? "\(name)/" : name
         }
         return (lines.joined(separator: "\n"), false)
+    }
+
+    func executeGrepSearch(_ input: [String: Any]) async -> ToolExecutionOutcome {
+        guard let query = (input["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !query.isEmpty else {
+            return ToolExecutionOutcome(text: "Missing: query", isError: true)
+        }
+
+        let targets = resolvedSearchTargets(from: input)
+        for target in targets where !sandbox.check(target) {
+            return ToolExecutionOutcome(text: "Access denied: outside project directory", isError: true)
+        }
+
+        let request = ExactSearchRequest(
+            query: query,
+            isRegexp: boolValue(from: input["is_regexp"], default: false),
+            caseSensitive: boolValue(from: input["case_sensitive"], default: false),
+            targets: targets,
+            maxResults: intValue(from: input["max_results"], default: 50),
+            contextLines: intValue(from: input["context_lines"], default: 1)
+        )
+
+        do {
+            let result = try await ExactSearchEngine.search(request: request, projectRoot: projectRoot)
+            let payload = result.prettyPrintedJSONString()
+            guard !result.matches.isEmpty else {
+                return ToolExecutionOutcome(
+                    displayText: "No matches found for \"\(query)\" in \(result.queryTimeMs) ms.",
+                    toolResultPayload: payload,
+                    isError: false
+                )
+            }
+
+            let summary = "Found \(result.returnedMatches) of \(result.totalMatches) matches in \(result.fileCount) files for \"\(query)\" in \(result.queryTimeMs) ms."
+            return ToolExecutionOutcome(
+                displayText: result.truncated ? summary + " [Truncated]" : summary,
+                toolResultPayload: payload,
+                isError: false
+            )
+        } catch {
+            return ToolExecutionOutcome(text: "grep_search failed: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    func executeSemanticSearch(_ input: [String: Any]) async -> ToolExecutionOutcome {
+        guard let query = (input["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !query.isEmpty else {
+            return ToolExecutionOutcome(text: "Missing: query", isError: true)
+        }
+
+        let targets = resolvedSearchTargets(from: input)
+        for target in targets where !sandbox.check(target) {
+            return ToolExecutionOutcome(text: "Access denied: outside project directory", isError: true)
+        }
+
+        do {
+            let result = try await SemanticSearchIndex(projectRoot: projectRoot).search(
+                request: SemanticSearchRequest(
+                    query: query,
+                    maxResults: intValue(from: input["max_results"], default: 12),
+                    paths: targets
+                )
+            )
+            let payload = result.prettyPrintedJSONString()
+            guard !result.matches.isEmpty else {
+                return ToolExecutionOutcome(
+                    displayText: "No semantic matches found for \"\(query)\" in \(result.queryTimeMs) ms.",
+                    toolResultPayload: payload,
+                    isError: false
+                )
+            }
+
+            let summary = "Found \(result.returnedMatches) of \(result.totalMatches) semantic matches for \"\(query)\" in \(result.queryTimeMs) ms."
+            return ToolExecutionOutcome(
+                displayText: result.truncated ? summary + " [Truncated]" : summary,
+                toolResultPayload: payload,
+                isError: false
+            )
+        } catch {
+            return ToolExecutionOutcome(text: "semantic_search failed: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    func executeFindSymbol(_ input: [String: Any]) async -> ToolExecutionOutcome {
+        guard let query = (input["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !query.isEmpty else {
+            return ToolExecutionOutcome(text: "Missing: query", isError: true)
+        }
+
+        let targets = resolvedAmbientSearchTargets(from: input)
+        for target in targets where !sandbox.check(target) {
+            return ToolExecutionOutcome(text: "Access denied: outside project directory", isError: true)
+        }
+
+        do {
+            let result = try await SymbolIntelligenceService(projectRoot: projectRoot).findSymbols(
+                request: FindSymbolRequest(
+                    query: query,
+                    maxResults: intValue(from: input["max_results"], default: 12),
+                    paths: targets
+                )
+            )
+            let payload = result.prettyPrintedJSONString()
+            guard !result.matches.isEmpty else {
+                return ToolExecutionOutcome(
+                    displayText: "No symbols found for \"\(query)\" in \(result.queryTimeMs) ms.",
+                    toolResultPayload: payload,
+                    isError: false
+                )
+            }
+
+            let summary = "Found \(result.returnedMatches) of \(result.totalMatches) symbols for \"\(query)\" in \(result.queryTimeMs) ms."
+            return ToolExecutionOutcome(
+                displayText: result.truncated ? summary + " [Truncated]" : summary,
+                toolResultPayload: payload,
+                isError: false
+            )
+        } catch {
+            return ToolExecutionOutcome(text: "find_symbol failed: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    func executeFindUsages(_ input: [String: Any]) async -> ToolExecutionOutcome {
+        let ambientLocation = resolvedAmbientCursorLocation(from: input)
+        let locationURL = ambientLocation.path.map { sandbox.resolvedURL(for: $0) }
+        if let locationURL, !sandbox.check(locationURL) {
+            return ToolExecutionOutcome(text: "Access denied: outside project directory", isError: true)
+        }
+
+        let usr = (input["usr"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if (usr == nil || usr?.isEmpty == true)
+            && (ambientLocation.path == nil || ambientLocation.line == nil || ambientLocation.column == nil) {
+            return ToolExecutionOutcome(
+                text: "find_usages requires either an explicit usr or a current file plus cursor location. Ambient editor context was insufficient.",
+                isError: true
+            )
+        }
+
+        let filterTargets = stringArray(from: input["paths"])
+            .map { sandbox.resolvedURL(for: $0) }
+        for target in filterTargets where !sandbox.check(target) {
+            return ToolExecutionOutcome(text: "Access denied: outside project directory", isError: true)
+        }
+
+        do {
+            let result = try await SymbolIntelligenceService(projectRoot: projectRoot).findUsages(
+                request: FindUsagesRequest(
+                    usr: usr,
+                    path: locationURL,
+                    line: ambientLocation.line,
+                    column: ambientLocation.column,
+                    maxResults: intValue(from: input["max_results"], default: 200),
+                    paths: filterTargets,
+                    includeDefinitions: boolValue(from: input["include_definitions"], default: true)
+                )
+            )
+            let payload = result.prettyPrintedJSONString()
+            let symbolName = result.resolvedSymbol.sourceKitPlaceholder ?? result.resolvedSymbol.name
+            guard !result.matches.isEmpty else {
+                return ToolExecutionOutcome(
+                    displayText: "No usages found for \"\(symbolName)\" in \(result.queryTimeMs) ms.",
+                    toolResultPayload: payload,
+                    isError: false
+                )
+            }
+
+            let summary = "Found \(result.returnedMatches) of \(result.totalMatches) symbol occurrences for \"\(symbolName)\" in \(result.queryTimeMs) ms."
+            return ToolExecutionOutcome(
+                displayText: result.truncated ? summary + " [Truncated]" : summary,
+                toolResultPayload: payload,
+                isError: false
+            )
+        } catch {
+            return ToolExecutionOutcome(text: "find_usages failed: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func resolvedPathInput(for tool: StudioToolName, input: [String: Any]) -> String? {
+        if let explicitPath = (input["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitPath.isEmpty {
+            return explicitPath
+        }
+
+        switch tool {
+        case .fileRead:
+            return ambientContextSnapshot?.toolDispatchPath
+        case .fileWrite, .filePatch:
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    private func resolvedAmbientSearchTargets(from input: [String: Any]) -> [URL] {
+        let explicitTargets = resolvedSearchTargets(from: input)
+        if input["path"] != nil || input["paths"] != nil {
+            return explicitTargets
+        }
+        if let ambientPath = ambientContextSnapshot?.toolDispatchPath {
+            return [sandbox.resolvedURL(for: ambientPath)]
+        }
+        return explicitTargets
+    }
+
+    private func resolvedAmbientCursorLocation(from input: [String: Any]) -> (path: String?, line: Int?, column: Int?) {
+        let explicitPath = (input["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let explicitLine = input["line"] as? Int
+        let explicitColumn = input["column"] as? Int
+
+        if explicitPath != nil || explicitLine != nil || explicitColumn != nil {
+            return (explicitPath, explicitLine, explicitColumn)
+        }
+
+        return (
+            ambientContextSnapshot?.toolDispatchPath,
+            ambientContextSnapshot?.toolDispatchCursor?.line,
+            ambientContextSnapshot?.toolDispatchCursor?.column
+        )
     }
 
     func executeDelegateToExplorer(_ input: [String: Any]) async -> ToolExecutionOutcome {
@@ -811,6 +1078,14 @@ extension AgenticClient {
         case "list_files":
             let raw = executeListFiles(input)
             return ToolExecutionOutcome(text: raw.0, isError: raw.1)
+        case "grep_search":
+            return await executeGrepSearch(input)
+        case "semantic_search":
+            return await executeSemanticSearch(input)
+        case "find_symbol":
+            return await executeFindSymbol(input)
+        case "find_usages":
+            return await executeFindUsages(input)
         case "web_search":
             return await executeWebSearch(input)
         default:
@@ -822,6 +1097,25 @@ extension AgenticClient {
         guard let values = value as? [Any] else { return [] }
         return values.compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    func boolValue(from value: Any?, default fallback: Bool) -> Bool {
+        value as? Bool ?? fallback
+    }
+
+    func intValue(from value: Any?, default fallback: Int) -> Int {
+        value as? Int ?? fallback
+    }
+
+    func resolvedSearchTargets(from input: [String: Any]) -> [URL] {
+        var targets: [URL] = []
+        if let path = (input["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+            targets.append(sandbox.resolvedURL(for: path))
+        }
+        targets.append(contentsOf: stringArray(from: input["paths"]).map { sandbox.resolvedURL(for: $0) })
+
+        var seen = Set<String>()
+        return targets.filter { seen.insert($0.standardizedFileURL.path).inserted }
     }
 
     /// Convert a typed HandoffOutcome into the ToolExecutionOutcome the orchestrator expects.
@@ -1301,6 +1595,7 @@ extension AgenticClient {
         )
 
         if let report {
+            await publishDiagnostics(report, source: "xcode_build")
             let formatted = BuildReportFormatter.formattedToolResult(
                 command: command,
                 report: report,
@@ -1371,6 +1666,7 @@ extension AgenticClient {
         )
 
         if let report {
+            await publishDiagnostics(report, source: "xcode_test")
             let formatted = BuildReportFormatter.formattedToolResult(
                 command: command,
                 report: report,
@@ -1401,6 +1697,13 @@ extension AgenticClient {
             text: formatted,
             isError: execution.exitStatus != 0 || execution.didTimeout
         )
+    }
+
+    private func publishDiagnostics(_ report: BuildReport, source: String) async {
+        let coordinator = ambientContextCoordinator
+        await MainActor.run {
+            coordinator?.replaceDiagnostics(from: report, source: source)
+        }
     }
 
     // MARK: - Xcode Preview (Build + Install + Launch + Screenshot)

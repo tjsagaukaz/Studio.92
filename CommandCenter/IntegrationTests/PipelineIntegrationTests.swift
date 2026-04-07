@@ -987,7 +987,7 @@ final class CapabilityRoutingTests: XCTestCase {
 
     func testTaskPhaseDefaultCapabilities() {
         XCTAssertEqual(TaskPhase.discovery.defaultCapabilities, [.research, .speed])
-        XCTAssertEqual(TaskPhase.analysis.defaultCapabilities, [.reasoning, .research])
+        XCTAssertEqual(TaskPhase.analysis.defaultCapabilities, [.reasoning, .research, .semanticRetrieval, .symbolRefactor])
         XCTAssertEqual(TaskPhase.implementation.defaultCapabilities, [.codeGeneration, .multifileEdit])
         XCTAssertEqual(TaskPhase.verification.defaultCapabilities, [.review])
         XCTAssertEqual(TaskPhase.repair.defaultCapabilities, [.buildRepair])

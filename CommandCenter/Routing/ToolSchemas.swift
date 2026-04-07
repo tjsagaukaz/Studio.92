@@ -19,10 +19,10 @@ enum DefaultToolSchemas {
     }
 
     static let explorerTools: [[String: Any]] = [
-        fileRead, listFiles, webSearch, webFetch, gitStatus, gitDiff
+        fileRead, listFiles, grepSearch, semanticSearch, findSymbol, findUsages, webSearch, webFetch, gitStatus, gitDiff
     ]
     static let reviewerTools: [[String: Any]] = [
-        fileRead, fileWrite, filePatch, listFiles, terminal, webSearch, webFetch,
+        fileRead, fileWrite, filePatch, listFiles, grepSearch, semanticSearch, findSymbol, findUsages, terminal, webSearch, webFetch,
         xcodeBuild, xcodeTest, gitStatus, gitDiff
     ]
     static let leanOperator: [[String: Any]] = [
@@ -30,6 +30,10 @@ enum DefaultToolSchemas {
         fileWrite,
         filePatch,
         listFiles,
+        grepSearch,
+        semanticSearch,
+        findSymbol,
+        findUsages,
         delegateToExplorer,
         delegateToReviewer,
         terminal,
@@ -47,6 +51,10 @@ enum DefaultToolSchemas {
         fileWrite,
         filePatch,
         listFiles,
+        grepSearch,
+        semanticSearch,
+        findSymbol,
+        findUsages,
         delegateToExplorer,
         delegateToReviewer,
         delegateToWorktree,
@@ -123,6 +131,117 @@ enum DefaultToolSchemas {
                 "path": ["type": "string", "description": "Directory path."]
             ] as [String: Any],
             required: ["path"]
+        )
+    ]
+
+    static let grepSearch: [String: Any] = [
+        "name": "grep_search",
+        "description": "Run an exact workspace search against current on-disk files and return precise path, line, and column matches. Use this when you know a literal string or regex to search for and want deterministic, bounded results without reading whole files. This is safer than broad file reads because it returns only the matching lines and a small amount of local context.",
+        "strict": false,
+        "input_examples": [
+            [
+                "query": "ExecutionLoopEngine",
+                "path": "CommandCenter/Execution",
+                "max_results": 25
+            ]
+        ],
+        "input_schema": closedObjectSchema(
+            properties: [
+                "query": ["type": "string", "description": "Exact string or regex to search for."],
+                "is_regexp": ["type": "boolean", "description": "Interpret query as a regular expression. Defaults to false."],
+                "case_sensitive": ["type": "boolean", "description": "Use case-sensitive matching. Defaults to false."],
+                "path": ["type": "string", "description": "Optional file or directory path to search within."],
+                "paths": [
+                    "type": "array",
+                    "description": "Optional list of file or directory paths to search within.",
+                    "items": ["type": "string", "description": "Absolute or project-relative path."]
+                ],
+                "max_results": ["type": "integer", "description": "Maximum number of matches to return. Defaults to 50, max 500."],
+                "context_lines": ["type": "integer", "description": "Number of context lines to include before and after each match. Defaults to 1, max 5."]
+            ] as [String: Any],
+            required: ["query"]
+        )
+    ]
+
+    static let semanticSearch: [String: Any] = [
+        "name": "semantic_search",
+        "description": "Run a structured semantic retrieval pass over the incrementally indexed workspace using SQLite FTS over declaration-aware Swift chunks. Use this when the query is conceptual, architectural, or pattern-based and exact token matching would miss relevant code. Results are deterministic and include ranked chunks with path, line range, summary, and snippet.",
+        "strict": false,
+        "input_examples": [
+            [
+                "query": "streaming pipeline orchestration",
+                "path": "CommandCenter/Execution",
+                "max_results": 8
+            ]
+        ],
+        "input_schema": closedObjectSchema(
+            properties: [
+                "query": ["type": "string", "description": "Conceptual or architectural search query."],
+                "path": ["type": "string", "description": "Optional file or directory path to constrain retrieval."],
+                "paths": [
+                    "type": "array",
+                    "description": "Optional list of file or directory paths to constrain retrieval.",
+                    "items": ["type": "string", "description": "Absolute or project-relative path."]
+                ],
+                "max_results": ["type": "integer", "description": "Maximum number of ranked chunks to return. Defaults to 12, max 50."]
+            ] as [String: Any],
+            required: ["query"]
+        )
+    ]
+
+    static let findSymbol: [String: Any] = [
+        "name": "find_symbol",
+        "description": "Resolve indexed workspace symbols by semantic identity using IndexStoreDB canonical occurrences, then validate returned definitions with SourceKit. Use this when you need a real symbol definition rather than a text match. Results are deterministic and include USR, file, line, and column.",
+        "strict": false,
+        "input_examples": [
+            [
+                "query": "RepositoryMonitor",
+                "path": "CommandCenter/Workspace",
+                "max_results": 5
+            ]
+        ],
+        "input_schema": closedObjectSchema(
+            properties: [
+                "query": ["type": "string", "description": "Symbol name or name fragment to resolve."],
+                "path": ["type": "string", "description": "Optional file or directory path to constrain symbol resolution."],
+                "paths": [
+                    "type": "array",
+                    "description": "Optional list of file or directory paths to constrain symbol resolution.",
+                    "items": ["type": "string", "description": "Absolute or project-relative path."]
+                ],
+                "max_results": ["type": "integer", "description": "Maximum number of symbols to return. Defaults to 12, max 50."]
+            ] as [String: Any],
+            required: ["query"]
+        )
+    ]
+
+    static let findUsages: [String: Any] = [
+        "name": "find_usages",
+        "description": "Find semantic symbol occurrences using IndexStoreDB USRs. Resolve the symbol either from an explicit USR or from an exact file, line, and column validated by SourceKit prepare-rename. Use this for real cross-file usages and call sites, not text-based references.",
+        "strict": false,
+        "input_examples": [
+            [
+                "path": "CommandCenter/Workspace/RepositoryMonitor.swift",
+                "line": 5,
+                "column": 13,
+                "max_results": 50
+            ]
+        ],
+        "input_schema": closedObjectSchema(
+            properties: [
+                "usr": ["type": "string", "description": "Optional Unified Symbol Resolution string. If omitted, path + line + column are required."],
+                "path": ["type": "string", "description": "File path containing the target symbol when resolving by location."],
+                "line": ["type": "integer", "description": "1-based line containing the target symbol when resolving by location."],
+                "column": ["type": "integer", "description": "1-based UTF-8 column containing the target symbol when resolving by location."],
+                "paths": [
+                    "type": "array",
+                    "description": "Optional list of file or directory paths to constrain returned usages.",
+                    "items": ["type": "string", "description": "Absolute or project-relative path."]
+                ],
+                "include_definitions": ["type": "boolean", "description": "Include definitions and declarations in the returned occurrences. Defaults to true."],
+                "max_results": ["type": "integer", "description": "Maximum number of occurrences to return. Defaults to 200, max 500."]
+            ] as [String: Any],
+            required: []
         )
     ]
 

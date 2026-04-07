@@ -62,6 +62,21 @@ struct InspectorSpan: Identifiable, Equatable {
         return Int(raw)
     }
 
+    var ambientContextID: String? {
+        guard let raw = attributes["ambient.context_id"], !raw.isEmpty, raw != "none" else { return nil }
+        return raw
+    }
+
+    var ambientSelectionFreshnessMs: Int? {
+        guard let raw = attributes["ambient.selection_freshness_ms"], raw != "none" else { return nil }
+        return Int(raw)
+    }
+
+    var ambientCurrentFile: String? {
+        guard let raw = attributes["ambient.current_file"], !raw.isEmpty else { return nil }
+        return raw
+    }
+
     var displayName: String {
         switch name {
         case "claude_stream": return "Claude Stream"
@@ -260,7 +275,7 @@ final class SessionInspectorModel {
 
     /// Update summary after live session completes.
     func finalizeLive(summary: TraceSummary) {
-        self.summary = InspectorSummary.from(summary)
+        self.summary = InspectorSummary.from(summary, sessionSpan: spans.first(where: { $0.kind == "session" }))
     }
 
     // MARK: - Historical Loading
@@ -342,6 +357,10 @@ final class SessionInspectorModel {
         if pendingFocusedSpanID == inspectorSpan.id {
             focus(spanID: inspectorSpan.id)
         }
+        if inspectorSpan.kind == "session" {
+            summary = summaryFromCounters()
+            return
+        }
         updateCounters(for: inspectorSpan)
     }
 
@@ -391,14 +410,18 @@ final class SessionInspectorModel {
     }
 
     private func summaryFromCounters() -> InspectorSummary {
-        InspectorSummary(
+        let sessionSpan = spans.first(where: { $0.kind == "session" })
+        return InspectorSummary(
             spanCount: _nonSessionCount,
             llmCallCount: _llmCallCount,
             toolExecutionCount: _toolExecutionCount,
             errorCount: _errorCount,
             totalDurationSeconds: _totalDuration,
             inputTokens: _inputTokens,
-            outputTokens: _outputTokens
+            outputTokens: _outputTokens,
+            ambientContextID: sessionSpan?.ambientContextID,
+            ambientSelectionFreshnessMs: sessionSpan?.ambientSelectionFreshnessMs,
+            ambientCurrentFile: sessionSpan?.ambientCurrentFile
         )
     }
 
@@ -435,8 +458,11 @@ struct InspectorSummary {
     let totalDurationSeconds: TimeInterval
     let inputTokens: Int
     let outputTokens: Int
+    let ambientContextID: String?
+    let ambientSelectionFreshnessMs: Int?
+    let ambientCurrentFile: String?
 
-    static func from(_ ts: TraceSummary) -> InspectorSummary {
+    static func from(_ ts: TraceSummary, sessionSpan: InspectorSpan? = nil) -> InspectorSummary {
         InspectorSummary(
             spanCount: ts.spanCount,
             llmCallCount: ts.llmCallCount,
@@ -444,7 +470,10 @@ struct InspectorSummary {
             errorCount: ts.errorCount,
             totalDurationSeconds: ts.totalDurationSeconds,
             inputTokens: ts.inputTokens,
-            outputTokens: ts.outputTokens
+            outputTokens: ts.outputTokens,
+            ambientContextID: sessionSpan?.ambientContextID,
+            ambientSelectionFreshnessMs: sessionSpan?.ambientSelectionFreshnessMs,
+            ambientCurrentFile: sessionSpan?.ambientCurrentFile
         )
     }
 }

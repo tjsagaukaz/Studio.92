@@ -116,6 +116,14 @@ public actor ToolExecutor {
             case .listFiles:
                 let raw = try await executeListFiles(input)
                 outcome = ToolExecutionOutcome(text: raw.0, isError: raw.1)
+            case .grepSearch:
+                outcome = try await executeGrepSearch(input)
+            case .semanticSearch:
+                outcome = try await executeSemanticSearch(input)
+            case .findSymbol:
+                outcome = try await executeFindSymbol(input)
+            case .findUsages:
+                outcome = try await executeFindUsages(input)
             case .delegateToExplorer:
                 outcome = try await executeDelegateToExplorer(toolCallID: toolCallID, input)
             case .delegateToReviewer:
@@ -238,6 +246,156 @@ public actor ToolExecutor {
             }
             return (lines.joined(separator: "\n"), false)
         }
+    }
+
+    // MARK: - Grep Search
+
+    private func executeGrepSearch(_ input: [String: AnyCodableValue]) async throws -> ToolExecutionOutcome {
+        guard let query = input["query"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !query.isEmpty else {
+            return ToolExecutionOutcome(text: "Missing required parameter: query", isError: true)
+        }
+
+        let pathTargets = resolvedSearchTargets(pathValue: input["path"], pathsValue: input["paths"])
+        for target in pathTargets where !sandbox.check(target) {
+            return ToolExecutionOutcome(text: "Access denied: path is outside the project directory.", isError: true)
+        }
+
+        let request = ExactSearchRequest(
+            query: query,
+            isRegexp: boolValue(from: input["is_regexp"], default: false),
+            caseSensitive: boolValue(from: input["case_sensitive"], default: false),
+            targets: pathTargets,
+            maxResults: intValue(from: input["max_results"], default: 50),
+            contextLines: intValue(from: input["context_lines"], default: 1)
+        )
+
+        let result = try await ExactSearchEngine.search(request: request, projectRoot: projectRoot)
+        let payload = result.prettyPrintedJSONString()
+        if result.matches.isEmpty {
+            return ToolExecutionOutcome(
+                displayText: "No matches found for \"\(query)\" in \(result.queryTimeMs) ms.",
+                toolResultContent: .text(payload),
+                isError: false
+            )
+        }
+
+        let summary = "Found \(result.returnedMatches) of \(result.totalMatches) matches in \(result.fileCount) files for \"\(query)\" in \(result.queryTimeMs) ms."
+        return ToolExecutionOutcome(
+            displayText: result.truncated ? summary + " [Truncated]" : summary,
+            toolResultContent: .text(payload),
+            isError: false
+        )
+    }
+
+    private func executeSemanticSearch(_ input: [String: AnyCodableValue]) async throws -> ToolExecutionOutcome {
+        guard let query = input["query"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !query.isEmpty else {
+            return ToolExecutionOutcome(text: "Missing required parameter: query", isError: true)
+        }
+
+        let pathTargets = resolvedSearchTargets(pathValue: input["path"], pathsValue: input["paths"])
+        for target in pathTargets where !sandbox.check(target) {
+            return ToolExecutionOutcome(text: "Access denied: path is outside the project directory.", isError: true)
+        }
+
+        let result = try await SemanticSearchIndex(projectRoot: projectRoot).search(
+            request: SemanticSearchRequest(
+                query: query,
+                maxResults: intValue(from: input["max_results"], default: 12),
+                paths: pathTargets
+            )
+        )
+        let payload = result.prettyPrintedJSONString()
+        if result.matches.isEmpty {
+            return ToolExecutionOutcome(
+                displayText: "No semantic matches found for \"\(query)\" in \(result.queryTimeMs) ms.",
+                toolResultContent: .text(payload),
+                isError: false
+            )
+        }
+
+        let summary = "Found \(result.returnedMatches) of \(result.totalMatches) semantic matches for \"\(query)\" in \(result.queryTimeMs) ms."
+        return ToolExecutionOutcome(
+            displayText: result.truncated ? summary + " [Truncated]" : summary,
+            toolResultContent: .text(payload),
+            isError: false
+        )
+    }
+
+    private func executeFindSymbol(_ input: [String: AnyCodableValue]) async throws -> ToolExecutionOutcome {
+        guard let query = input["query"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !query.isEmpty else {
+            return ToolExecutionOutcome(text: "Missing required parameter: query", isError: true)
+        }
+
+        let pathTargets = resolvedSearchTargets(pathValue: input["path"], pathsValue: input["paths"])
+        for target in pathTargets where !sandbox.check(target) {
+            return ToolExecutionOutcome(text: "Access denied: path is outside the project directory.", isError: true)
+        }
+
+        let result = try await SymbolIntelligenceService(projectRoot: projectRoot).findSymbols(
+            request: FindSymbolRequest(
+                query: query,
+                maxResults: intValue(from: input["max_results"], default: 12),
+                paths: pathTargets
+            )
+        )
+        let payload = result.prettyPrintedJSONString()
+        if result.matches.isEmpty {
+            return ToolExecutionOutcome(
+                displayText: "No symbols found for \"\(query)\" in \(result.queryTimeMs) ms.",
+                toolResultContent: .text(payload),
+                isError: false
+            )
+        }
+
+        let summary = "Found \(result.returnedMatches) of \(result.totalMatches) symbols for \"\(query)\" in \(result.queryTimeMs) ms."
+        return ToolExecutionOutcome(
+            displayText: result.truncated ? summary + " [Truncated]" : summary,
+            toolResultContent: .text(payload),
+            isError: false
+        )
+    }
+
+    private func executeFindUsages(_ input: [String: AnyCodableValue]) async throws -> ToolExecutionOutcome {
+        let locationURL = input["path"]?.stringValue.map { sandbox.resolvedURL(for: $0) }
+        if let locationURL, !sandbox.check(locationURL) {
+            return ToolExecutionOutcome(text: "Access denied: path is outside the project directory.", isError: true)
+        }
+
+        let filterTargets = stringArray(from: input["paths"]).map { sandbox.resolvedURL(for: $0) }
+        for target in filterTargets where !sandbox.check(target) {
+            return ToolExecutionOutcome(text: "Access denied: path is outside the project directory.", isError: true)
+        }
+
+        let result = try await SymbolIntelligenceService(projectRoot: projectRoot).findUsages(
+            request: FindUsagesRequest(
+                usr: input["usr"]?.stringValue,
+                path: locationURL,
+                line: intValueOptional(from: input["line"]),
+                column: intValueOptional(from: input["column"]),
+                maxResults: intValue(from: input["max_results"], default: 200),
+                paths: filterTargets,
+                includeDefinitions: boolValue(from: input["include_definitions"], default: true)
+            )
+        )
+        let payload = result.prettyPrintedJSONString()
+        let symbolName = result.resolvedSymbol.sourceKitPlaceholder ?? result.resolvedSymbol.name
+        if result.matches.isEmpty {
+            return ToolExecutionOutcome(
+                displayText: "No usages found for \"\(symbolName)\" in \(result.queryTimeMs) ms.",
+                toolResultContent: .text(payload),
+                isError: false
+            )
+        }
+
+        let summary = "Found \(result.returnedMatches) of \(result.totalMatches) symbol occurrences for \"\(symbolName)\" in \(result.queryTimeMs) ms."
+        return ToolExecutionOutcome(
+            displayText: result.truncated ? summary + " [Truncated]" : summary,
+            toolResultContent: .text(payload),
+            isError: false
+        )
     }
 
     private func listRecursive(url: URL, depth: Int, maxDepth: Int) throws -> (String, Bool) {
@@ -952,6 +1110,14 @@ public actor ToolExecutor {
             case .listFiles:
                 let raw = try await executeListFiles(input)
                 return ToolExecutionOutcome(text: raw.0, isError: raw.1)
+            case .grepSearch:
+                return try await executeGrepSearch(input)
+            case .semanticSearch:
+                return try await executeSemanticSearch(input)
+            case .findSymbol:
+                return try await executeFindSymbol(input)
+            case .findUsages:
+                return try await executeFindUsages(input)
             case .webSearch:
                 return try await executeWebSearch(input, emitProgress: false)
             default:
@@ -967,6 +1133,38 @@ public actor ToolExecutor {
         return values.compactMap(\.stringValue)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    private func boolValue(from value: AnyCodableValue?, default fallback: Bool) -> Bool {
+        guard let value else { return fallback }
+        if case .bool(let bool) = value { return bool }
+        return fallback
+    }
+
+    private func intValue(from value: AnyCodableValue?, default fallback: Int) -> Int {
+        guard let value else { return fallback }
+        if case .int(let int) = value { return int }
+        return fallback
+    }
+
+    private func intValueOptional(from value: AnyCodableValue?) -> Int? {
+        guard let value else { return nil }
+        if case .int(let int) = value { return int }
+        return nil
+    }
+
+    private func resolvedSearchTargets(
+        pathValue: AnyCodableValue?,
+        pathsValue: AnyCodableValue?
+    ) -> [URL] {
+        var targets: [URL] = []
+        if let path = pathValue?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+            targets.append(sandbox.resolvedURL(for: path))
+        }
+        targets.append(contentsOf: stringArray(from: pathsValue).map { sandbox.resolvedURL(for: $0) })
+
+        var seen = Set<String>()
+        return targets.filter { seen.insert($0.standardizedFileURL.path).inserted }
     }
 
 }

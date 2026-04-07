@@ -17,6 +17,10 @@ enum StudioToolName: String, Sendable, CaseIterable, Hashable {
     case fileWrite             = "file_write"
     case filePatch             = "file_patch"
     case listFiles             = "list_files"
+    case grepSearch            = "grep_search"
+    case semanticSearch        = "semantic_search"
+    case findSymbol            = "find_symbol"
+    case findUsages            = "find_usages"
     case delegateToExplorer    = "delegate_to_explorer"
     case delegateToReviewer    = "delegate_to_reviewer"
     case delegateToWorktree    = "delegate_to_worktree"
@@ -44,8 +48,11 @@ enum StudioToolName: String, Sendable, CaseIterable, Hashable {
         case "read_file":                               self = .fileRead
         case "create_file", "write_file":               self = .fileWrite
         case "apply_patch":                             self = .filePatch
-        case "list_dir", "file_search",
-             "grep_search", "semantic_search":          self = .listFiles
+        case "list_dir", "file_search":               self = .listFiles
+        case "grep_search":                             self = .grepSearch
+        case "semantic_search":                         self = .semanticSearch
+        case "find_symbol":                            self = .findSymbol
+        case "find_usages":                            self = .findUsages
         case "fetch_webpage":                           self = .webFetch
         case "run_in_terminal":                         self = .terminal
         case "take_screenshot", "capture_screenshot":   self = .screenshotSimulator
@@ -58,7 +65,7 @@ enum StudioToolName: String, Sendable, CaseIterable, Hashable {
 
     /// Read-only, side-effect-free tools safe for concurrent execution.
     static let parallelizable: Set<StudioToolName> = [
-        .fileRead, .listFiles, .webSearch, .webFetch,
+        .fileRead, .listFiles, .grepSearch, .semanticSearch, .findSymbol, .findUsages, .webSearch, .webFetch,
         .screenshotSimulator, .gitStatus, .gitDiff, .multimodalAnalyze
     ]
 

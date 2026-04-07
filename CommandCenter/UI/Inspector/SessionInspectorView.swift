@@ -163,6 +163,15 @@ struct SessionInspectorView: View {
             if summary.totalDurationSeconds > 0 {
                 lines.append("Duration: \(formatDuration(summary.totalDurationSeconds))")
             }
+            if let contextID = summary.ambientContextID {
+                lines.append("Ambient Context: \(contextID)")
+            }
+            if let freshnessMs = summary.ambientSelectionFreshnessMs {
+                lines.append("Selection Freshness: \(freshnessMs)ms")
+            }
+            if let currentFile = summary.ambientCurrentFile {
+                lines.append("Ambient File: \(currentFile)")
+            }
             lines.append("")
         }
         let formatter = DateFormatter()
@@ -257,7 +266,28 @@ struct SessionInspectorView: View {
                     color: StudioStatusColor.danger
                 )
             }
+            if let contextID = summary.ambientContextID {
+                summaryPill(
+                    label: "Context",
+                    value: compactContextID(contextID),
+                    color: StudioTextColor.secondary
+                )
+            }
+            if let freshnessMs = summary.ambientSelectionFreshnessMs {
+                summaryPill(
+                    label: "Selection",
+                    value: "\(freshnessMs)ms",
+                    color: freshnessMs <= 30_000 ? StudioStatusColor.success : StudioTextColor.tertiary
+                )
+            }
             Spacer()
+            if let currentFile = summary.ambientCurrentFile {
+                Text(displayAmbientFile(currentFile))
+                    .font(StudioTypography.dataMicro)
+                    .foregroundStyle(StudioTextColor.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
             if summary.totalDurationSeconds > 0 {
                 Text(formatDuration(summary.totalDurationSeconds))
                     .font(StudioTypography.dataMicro)
@@ -356,6 +386,17 @@ struct SessionInspectorView: View {
             return String(format: "%.1fk", Double(count) / 1000)
         }
         return "\(count)"
+    }
+
+    private func compactContextID(_ contextID: String) -> String {
+        guard contextID.count > 12 else { return contextID }
+        let prefix = contextID.prefix(8)
+        let suffix = contextID.suffix(4)
+        return "\(prefix)…\(suffix)"
+    }
+
+    private func displayAmbientFile(_ path: String) -> String {
+        URL(fileURLWithPath: path).lastPathComponent
     }
 }
 

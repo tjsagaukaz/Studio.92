@@ -439,3 +439,315 @@ final class LatencyDiagnosticsEvictionTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Ambient Editor Context
+
+final class AmbientEditorContextTests: XCTestCase {
+
+    @MainActor
+    func testStaleSelectionAndCursorAreDroppedFromSnapshot() throws {
+        let workspaceURL = try makeWorkspace()
+        let fileURL = workspaceURL.appendingPathComponent("Example.swift")
+        try "struct Example {}\n".write(to: fileURL, atomically: true, encoding: .utf8)
+
+        let coordinator = AmbientEditorContextCoordinator(workspaceURL: workspaceURL)
+        let observedAt = Date(timeIntervalSinceReferenceDate: 100)
+
+        coordinator.noteSelection(
+            path: fileURL.path,
+            content: "struct Example {}\n",
+            selection: NSRange(location: 7, length: 7),
+            language: "swift",
+            isDirty: false,
+            observedAt: observedAt,
+            openFiles: [OpenFileContext(path: fileURL.path, language: "swift", isDirty: false, lastFocusedAt: observedAt)]
+        )
+
+        let snapshot = coordinator.snapshot(
+            for: .toolDispatch,
+            influenceLevel: .minimal,
+            now: observedAt.addingTimeInterval(31)
+        )
+
+        XCTAssertNil(snapshot.selectedRange)
+        XCTAssertNil(snapshot.currentFile?.cursorLine)
+        XCTAssertNil(snapshot.currentFile?.cursorColumn)
+        XCTAssertEqual(snapshot.currentFile?.path, fileURL.path)
+        XCTAssertEqual(snapshot.selectionFreshnessMs, 31_000)
+        XCTAssertFalse(snapshot.contextID.uuidString.isEmpty)
+    }
+
+    @MainActor
+    func testSelectionWinsConflictOverDiagnostics() throws {
+        let workspaceURL = try makeWorkspace()
+        let fileA = workspaceURL.appendingPathComponent("A.swift")
+        let fileB = workspaceURL.appendingPathComponent("B.swift")
+        try "func alpha() {}\n".write(to: fileA, atomically: true, encoding: .utf8)
+        try "func beta() {}\n".write(to: fileB, atomically: true, encoding: .utf8)
+
+        let coordinator = AmbientEditorContextCoordinator(workspaceURL: workspaceURL)
+        let observedAt = Date(timeIntervalSinceReferenceDate: 200)
+        coordinator.noteSelection(
+            path: fileA.path,
+            content: "func alpha() {}\n",
+            selection: NSRange(location: 5, length: 5),
+            language: "swift",
+            isDirty: false,
+            observedAt: observedAt,
+            openFiles: [OpenFileContext(path: fileA.path, language: "swift", isDirty: false, lastFocusedAt: observedAt)]
+        )
+        coordinator.replaceDiagnostics([
+            EditorDiagnosticContext(
+                path: fileB.path,
+                line: 1,
+                column: 1,
+                severity: .error,
+                message: "Cannot find 'beta' in scope",
+                source: "xcode_build",
+                observedAt: observedAt
+            )
+        ], observedAt: observedAt)
+
+        let snapshot = coordinator.snapshot(for: .modelRouting, influenceLevel: .standard, now: observedAt)
+
+        XCTAssertEqual(snapshot.conflict?.reason, .selectionOverridesOtherSignals)
+        XCTAssertEqual(snapshot.routingFocus()?.path, fileA.path)
+    }
+
+    func testRoutingUsesAmbientDiagnosticsAndRecentEditsDeterministically() {
+        let observedAt = Date(timeIntervalSinceReferenceDate: 300)
+        let contextID = UUID()
+        let diagnosticsContext = DiagnosticsContext(items: [
+            EditorDiagnosticContext(
+                path: "/tmp/Example.swift",
+                line: 12,
+                column: 4,
+                severity: .error,
+                message: "Value of type 'Int' has no member 'foo'",
+                source: "xcode_build",
+                observedAt: observedAt
+            )
+        ], observedAt: observedAt)
+        let ambient = AmbientEditorContext(
+            contextID: contextID,
+            capturedAt: observedAt,
+            lastUpdatedAt: observedAt,
+            influenceLevel: .standard,
+            selectionFreshnessMs: nil,
+            currentFile: nil,
+            selectedRange: nil,
+            openFiles: .empty,
+            recentEdits: [RecentEditContext(path: "/tmp/Example.swift", changedLineRange: nil, timestamp: observedAt, source: "workspace")],
+            diagnostics: diagnosticsContext,
+            gitContext: nil,
+            conflict: nil
+        )
+
+        let diagnosticDecision = StudioModelStrategy.routingDecision(context: .init(
+            goal: "fix this error",
+            ambientContext: ambient
+        ))
+        XCTAssertEqual(diagnosticDecision.reason, "ambient_diagnostics_focus")
+
+        let recentEditDecision = StudioModelStrategy.routingDecision(context: .init(
+            goal: "review my changes",
+            ambientContext: ambient
+        ))
+        XCTAssertEqual(recentEditDecision.reason, "ambient_recent_edits_review")
+        XCTAssertEqual(recentEditDecision.model.role, .review)
+        XCTAssertEqual(ambient.contextID, contextID)
+    }
+
+    func testTaskPlanningUsesCurrentFileFocus() {
+        let observedAt = Date(timeIntervalSinceReferenceDate: 400)
+        let contextID = UUID()
+        let ambient = AmbientEditorContext(
+            contextID: contextID,
+            capturedAt: observedAt,
+            lastUpdatedAt: observedAt,
+            influenceLevel: .standard,
+            selectionFreshnessMs: nil,
+            currentFile: CurrentFileContext(
+                path: "/tmp/Focus.swift",
+                language: "swift",
+                cursorLine: 14,
+                cursorColumn: 9,
+                nearbyLineRange: 11...17,
+                nearbySnippet: "let focused = true",
+                isDirty: false,
+                observedAt: observedAt
+            ),
+            selectedRange: nil,
+            openFiles: OpenFilesContext(
+                files: [OpenFileContext(path: "/tmp/Focus.swift", language: "swift", isDirty: false, lastFocusedAt: observedAt)],
+                observedAt: observedAt
+            ),
+            recentEdits: [],
+            diagnostics: .empty,
+            gitContext: nil,
+            conflict: nil
+        )
+
+        let assessment = TaskComplexityAnalyzer.ComplexityAssessment(
+            shouldUseDAG: true,
+            reason: "multi_step_signal",
+            matchedSignals: ["refactor"],
+            suggestedPhases: [.discovery, .analysis, .implementation]
+        )
+
+        let plan = TaskPlanGenerator.generate(goal: "Refactor this", assessment: assessment, ambientContext: ambient)
+        XCTAssertTrue(plan.steps[0].intent.contains("Focus.swift"))
+
+        let supplement = TaskPlanPromptInjection.promptSupplement(
+            for: plan,
+            currentStep: plan.steps[0],
+            ambientContext: ambient
+        )
+        XCTAssertTrue(supplement?.contains("Active editor file: /tmp/Focus.swift") == true)
+        XCTAssertEqual(ambient.contextID, contextID)
+    }
+
+    func testToolDispatchReadsAmbientFileButRejectsAmbientMutationTarget() async throws {
+        let workspaceURL = try makeWorkspace()
+        let fileURL = workspaceURL.appendingPathComponent("Readme.swift")
+        try "let value = 42\n".write(to: fileURL, atomically: true, encoding: .utf8)
+
+        let observedAt = Date(timeIntervalSinceReferenceDate: 500)
+        let ambient = AmbientEditorContext(
+            contextID: UUID(),
+            capturedAt: observedAt,
+            lastUpdatedAt: observedAt,
+            influenceLevel: .minimal,
+            selectionFreshnessMs: 0,
+            currentFile: CurrentFileContext(
+                path: fileURL.path,
+                language: "swift",
+                cursorLine: 1,
+                cursorColumn: 5,
+                nearbyLineRange: 1...1,
+                nearbySnippet: "let value = 42",
+                isDirty: false,
+                observedAt: observedAt
+            ),
+            selectedRange: SelectedRangeContext(
+                path: fileURL.path,
+                startLine: 1,
+                startColumn: 1,
+                endLine: 1,
+                endColumn: 4,
+                selectedText: "let",
+                isTruncated: false,
+                observedAt: observedAt
+            ),
+            openFiles: OpenFilesContext(
+                files: [OpenFileContext(path: fileURL.path, language: "swift", isDirty: false, lastFocusedAt: observedAt)],
+                observedAt: observedAt
+            ),
+            recentEdits: [],
+            diagnostics: .empty,
+            gitContext: nil,
+            conflict: nil
+        )
+
+        let client = AgenticClient(
+            apiKey: nil,
+            projectRoot: workspaceURL,
+            openAIKey: nil,
+            runtimePolicy: CommandRuntimePolicy(accessScope: .workspaceOnly, approvalMode: .neverAsk),
+            allowMachineWideAccess: false,
+            ambientContextSnapshot: ambient
+        )
+
+        let readOutcome = await client.executeTool(name: "file_read", input: [:])
+        XCTAssertFalse(readOutcome.isError)
+        XCTAssertTrue((readOutcome.toolResultPayload as? String)?.contains("let value = 42") == true)
+
+        let patchOutcome = await client.executeTool(name: "file_patch", input: [
+            "old_string": "42",
+            "new_string": "43"
+        ])
+        XCTAssertTrue(patchOutcome.isError)
+        XCTAssertTrue(patchOutcome.displayText.contains("cannot infer a mutation target"))
+    }
+
+    func testPromptInjectionIncludesContextIDAndSelectionFreshness() {
+        let observedAt = Date(timeIntervalSinceReferenceDate: 600)
+        let contextID = UUID(uuidString: "12345678-1234-1234-1234-1234567890AB")!
+        let ambient = AmbientEditorContext(
+            contextID: contextID,
+            capturedAt: observedAt,
+            lastUpdatedAt: observedAt,
+            influenceLevel: .minimal,
+            selectionFreshnessMs: 1_200,
+            currentFile: CurrentFileContext(
+                path: "/tmp/Focus.swift",
+                language: "swift",
+                cursorLine: 7,
+                cursorColumn: 3,
+                nearbyLineRange: nil,
+                nearbySnippet: nil,
+                isDirty: false,
+                observedAt: observedAt
+            ),
+            selectedRange: nil,
+            openFiles: .empty,
+            recentEdits: [],
+            diagnostics: .empty,
+            gitContext: nil,
+            conflict: nil
+        )
+
+        let block = ambient.promptInjectionBlock(workspaceRoot: "/tmp")
+        XCTAssertTrue(block?.contains("context_id: 12345678-1234-1234-1234-1234567890AB") == true)
+        XCTAssertTrue(block?.contains("selection_freshness_ms: 1200") == true)
+    }
+
+    func testHistoricalSummaryIncludesAmbientContextMetadata() throws {
+        let traceID = UUID()
+        let startedAt = Date(timeIntervalSinceReferenceDate: 700)
+        let contextID = "12345678-1234-1234-1234-1234567890AB"
+        let attributes = try JSONEncoder().encode([
+            "ambient.context_id": contextID,
+            "ambient.selection_freshness_ms": "1200",
+            "ambient.current_file": "/tmp/Focus.swift"
+        ])
+
+        let sessionSpan = PersistedSpan(
+            id: UUID(),
+            traceID: traceID,
+            kind: "session",
+            name: "agentic_loop",
+            startedAt: startedAt,
+            endedAt: startedAt.addingTimeInterval(2),
+            statusText: "ok",
+            isError: false,
+            attributesJSON: attributes
+        )
+        let toolSpan = PersistedSpan(
+            id: UUID(),
+            parentID: sessionSpan.id,
+            traceID: traceID,
+            kind: "toolExecution",
+            name: "file_read",
+            startedAt: startedAt,
+            endedAt: startedAt.addingTimeInterval(0.25),
+            statusText: "ok",
+            isError: false
+        )
+
+        let model = SessionInspectorModel()
+        model.loadHistorical(traceID: traceID, persistedSpans: [toolSpan, sessionSpan])
+
+        XCTAssertEqual(model.summary?.ambientContextID, contextID)
+        XCTAssertEqual(model.summary?.ambientSelectionFreshnessMs, 1200)
+        XCTAssertEqual(model.summary?.ambientCurrentFile, "/tmp/Focus.swift")
+        XCTAssertEqual(model.summary?.spanCount, 1)
+        XCTAssertEqual(model.summary?.toolExecutionCount, 1)
+    }
+
+    private func makeWorkspace() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+}
