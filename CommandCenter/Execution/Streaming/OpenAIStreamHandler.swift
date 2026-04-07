@@ -830,20 +830,14 @@ extension AgenticClient {
             ])
         }
 
-        // When tool count exceeds threshold, use hosted tool_search to defer
-        // loading — the model searches registered tools and loads only what it needs.
-        // Disable strict mode inside tool_search to avoid schema-compilation limits.
+        // Disable strict mode when tool count is high to stay under OpenAI's
+        // schema-compilation complexity limit.
         if functionTools.count > toolSearchThreshold {
-            let relaxedTools = functionTools.map { tool -> [String: Any] in
+            functionTools = functionTools.map { tool in
                 var t = tool
                 t["strict"] = false
                 return t
             }
-            let toolSearchEntry: [String: Any] = [
-                "type": "tool_search",
-                "tools": relaxedTools
-            ]
-            return builtinTools + [toolSearchEntry]
         }
 
         return builtinTools + functionTools
