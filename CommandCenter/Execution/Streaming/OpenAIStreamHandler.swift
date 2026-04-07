@@ -832,11 +832,17 @@ extension AgenticClient {
 
         // When tool count exceeds threshold, use hosted tool_search to defer
         // loading — the model searches registered tools and loads only what it needs.
+        // Disable strict mode inside tool_search to avoid schema-compilation limits.
         if functionTools.count > toolSearchThreshold {
+            let relaxedTools = functionTools.map { tool -> [String: Any] in
+                var t = tool
+                t["strict"] = false
+                return t
+            }
             let toolSearchEntry: [String: Any] = [
                 "type": "tool_search",
                 "vector_store_ids": [] as [String],
-                "tools": functionTools
+                "tools": relaxedTools
             ]
             return builtinTools + [toolSearchEntry]
         }
