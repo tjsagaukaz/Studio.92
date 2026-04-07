@@ -841,7 +841,6 @@ extension AgenticClient {
             }
             let toolSearchEntry: [String: Any] = [
                 "type": "tool_search",
-                "vector_store_ids": [] as [String],
                 "tools": relaxedTools
             ]
             return builtinTools + [toolSearchEntry]
