@@ -255,9 +255,23 @@ final class OpenAIExecutionLoop: ExecutionLoopEngine, @unchecked Sendable {
                         }
 
                         for searchCall in finalResponse?.webSearchCalls ?? [] {
+                            // Synthesize a normalized query JSON so display layers can show
+                            // what was actually searched instead of generic "the web".
+                            let queryInputJSON: String? = {
+                                guard !searchCall.queries.isEmpty else { return searchCall.actionJSON }
+                                let joined = searchCall.queries.joined(separator: " | ")
+                                let escaped = joined
+                                    .replacingOccurrences(of: "\\", with: "\\\\")
+                                    .replacingOccurrences(of: "\"", with: "\\\"")
+                                return "{\"query\": \"\(escaped)\"}"
+                            }()
+
                             // Skip if already streamed in real-time via output_item.added
                             guard !streamedWebSearchIDs.contains(searchCall.id) else {
-                                // Still emit the result for already-streamed searches
+                                // Backfill query so the trace title shows the actual search terms.
+                                if let json = queryInputJSON, !json.isEmpty {
+                                    continuation.yield(.toolCallInputDelta(id: searchCall.id, partialJSON: json))
+                                }
                                 continuation.yield(
                                     .toolCallResult(
                                         id: searchCall.id,
@@ -268,8 +282,8 @@ final class OpenAIExecutionLoop: ExecutionLoopEngine, @unchecked Sendable {
                                 continue
                             }
                             continuation.yield(.toolCallStart(id: searchCall.id, name: "web_search"))
-                            if let actionJSON = searchCall.actionJSON, !actionJSON.isEmpty {
-                                continuation.yield(.toolCallInputDelta(id: searchCall.id, partialJSON: actionJSON))
+                            if let json = queryInputJSON, !json.isEmpty {
+                                continuation.yield(.toolCallInputDelta(id: searchCall.id, partialJSON: json))
                             }
                             continuation.yield(
                                 .toolCallResult(

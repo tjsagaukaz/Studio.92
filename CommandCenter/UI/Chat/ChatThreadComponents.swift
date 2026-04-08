@@ -656,8 +656,35 @@ struct InterleavedTurnContentView: View {
         return nil
     }
 
+    /// Merges consecutive `.toolActivity` blocks into a single group so all
+    /// adjacent traces render in one scrollable container instead of N separate stacks.
+    private var mergedBlocks: [TurnContentBlock] {
+        let raw = turn.interleavedBlocks
+        var merged: [TurnContentBlock] = []
+        var pendingTraces: [ToolTrace] = []
+        var pendingID: String = ""
+
+        for block in raw {
+            switch block {
+            case .text:
+                if !pendingTraces.isEmpty {
+                    merged.append(.toolActivity(id: pendingID, traces: pendingTraces))
+                    pendingTraces = []
+                }
+                merged.append(block)
+            case .toolActivity(let id, let traces):
+                if pendingTraces.isEmpty { pendingID = id }
+                pendingTraces.append(contentsOf: traces)
+            }
+        }
+        if !pendingTraces.isEmpty {
+            merged.append(.toolActivity(id: pendingID, traces: pendingTraces))
+        }
+        return merged
+    }
+
     var body: some View {
-        let blocks = turn.interleavedBlocks
+        let blocks = mergedBlocks
         VStack(alignment: .leading, spacing: StudioChatLayout.messageInternalSpacing) {
             ForEach(Array(blocks.enumerated()), id: \.element.id) { index, block in
                 switch block {
@@ -706,22 +733,16 @@ struct InterleavedTurnContentView: View {
     }
 }
 
-/// Compact inline tool activity — single summary line, expandable.
-/// Follows the 2026 pattern: collapsed natural-language summary,
-/// click to see details. No timeline rail, no vertical connectors.
+/// Compact inline tool activity — height-capped scrollable container with gradient fade,
+/// matching the reasoning HUD pattern. No visible border or background.
 private struct InlineToolTraceGroup: View {
 
     let traces: [ToolTrace]
 
-    @State private var isExpanded = false
-
-    private var historicalTraces: [ToolTrace] {
-        sortedTraces.filter(\.isHistoricalInlineTrace)
-    }
-
-    private var showsHistoricalPills: Bool {
-        !hasLive && !historicalTraces.isEmpty && historicalTraces.count == sortedTraces.count
-    }
+    /// Traces above this count engage the scroll container.
+    private let scrollThreshold = 4
+    /// Maximum height for the scrollable container (~6 visible rows).
+    private let maxContainerHeight: CGFloat = 120
 
     private var sortedTraces: [ToolTrace] {
         traces.sorted(by: {
@@ -733,193 +754,81 @@ private struct InlineToolTraceGroup: View {
         sortedTraces.contains(where: \.isLive)
     }
 
-    /// Natural language summary: "Searched 3 files, edited 2 files"
-    private var summaryText: String {
-        if hasLive, let current = sortedTraces.last(where: \.isLive) {
-            return liveDescription(current)
-        }
-
-        var counts: [ToolTrace.Kind: Int] = [:]
-        var webCount = 0
-        for trace in sortedTraces {
-            if trace.sourceName == "web_search" || trace.sourceName == "web_fetch" {
-                webCount += 1
-            } else {
-                counts[trace.kind, default: 0] += 1
-            }
-        }
-
-        var parts: [String] = []
-        if webCount > 0 {
-            parts.append("Searched web")
-        }
-
-        parts += counts.sorted(by: { $0.value > $1.value }).prefix(3).map { kind, count in
-            "\(verbPastTense(kind)) \(count) \(nounForKind(kind, count: count))"
-        }
-
-        if parts.isEmpty { return "Ran tools" }
-        return parts.joined(separator: ", ")
-    }
-
     private var hasWeb: Bool {
         sortedTraces.contains { $0.sourceName == "web_search" || $0.sourceName == "web_fetch" }
     }
 
     var body: some View {
         if !sortedTraces.isEmpty {
-            Group {
-                if showsHistoricalPills {
-                    HistoricalTracePillStack(traces: historicalTraces)
-                } else {
-                    VStack(alignment: .leading, spacing: 0) {
-                        Button {
-                            withAnimation(StudioMotion.standardSpring) {
-                                isExpanded.toggle()
-                            }
-                        } label: {
-                            HStack(spacing: StudioSpacing.sm) {
-                                Image(systemName: hasLive ? (hasWeb ? "globe" : "circle.fill") : (hasWeb ? "globe" : "checkmark"))
-                                    .font(.system(size: hasLive && !hasWeb ? 7 : (hasWeb ? 10 : 8), weight: .semibold))
-                                    .foregroundStyle(hasLive ? StudioAccentColor.primary : StudioTextColor.tertiary)
-                                    .frame(width: 12)
-
-                                Text(summaryText)
-                                    .font(StudioTypography.footnoteMedium)
-                                    .foregroundStyle(hasLive ? StudioTextColor.secondary : StudioTextColor.tertiary)
-                                    .lineLimit(1)
-
-                                if sortedTraces.count > 1 {
-                                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                                        .font(StudioTypography.badge)
-                                        .foregroundStyle(StudioTextColor.tertiary.opacity(0.6))
-                                }
-
-                                Spacer(minLength: 0)
-                            }
-                            .padding(.vertical, StudioSpacing.xs)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-
-                        if isExpanded && sortedTraces.count > 1 {
-                            VStack(alignment: .leading, spacing: StudioSpacing.xxsPlus) {
-                                ForEach(sortedTraces, id: \.id) { trace in
-                                    HStack(spacing: StudioSpacing.sm) {
-                                        Image(systemName: traceIcon(trace))
-                                            .font(StudioTypography.badgeMedium)
-                                            .foregroundStyle(trace.isLive ? StudioTextColor.secondary : StudioTextColor.tertiary.opacity(0.6))
-                                            .frame(width: 12)
-
-                                        VStack(alignment: .leading, spacing: 1) {
-                                            Text(traceLabel(trace))
-                                                .font(StudioTypography.caption)
-                                                .foregroundStyle(trace.isLive ? StudioTextColor.secondary : StudioTextColor.tertiary)
-                                                .lineLimit(1)
-
-                                            if let desc = traceDescription(trace), !desc.isEmpty {
-                                                Text(desc)
-                                                    .font(StudioTypography.badgeSmall)
-                                                    .foregroundStyle(StudioTextColor.tertiary.opacity(0.6))
-                                                    .lineLimit(1)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            .padding(.leading, 0)
-                            .padding(.top, StudioSpacing.xxs)
-                            .padding(.bottom, StudioSpacing.xs)
-                            .transition(.studioCollapse)
-                        }
-                    }
-                    .opacity(StudioChatLayout.toolTraceOpacity)
+            if sortedTraces.count <= scrollThreshold {
+                traceList
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    traceList
                 }
+                .frame(maxHeight: maxContainerHeight)
+                .mask(
+                    LinearGradient(
+                        stops: [
+                            .init(color: .black, location: 0.00),
+                            .init(color: .black, location: 0.84),
+                            .init(color: .clear, location: 1.00)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
             }
         }
     }
 
-    private func liveDescription(_ trace: ToolTrace) -> String {
-        if trace.sourceName == "web_search" {
-            let query = webQuery(trace)
-            return "Searching web — \(query)"
-        }
-        if trace.sourceName == "web_fetch" {
-            let url = webQuery(trace)
-            return "Fetching — \(url)"
-        }
-        let target = traceTarget(trace)
-        switch trace.kind {
-        case .search: return "Searching\(target)"
-        case .read:   return "Reading\(target)"
-        case .edit:   return "Editing\(target)"
-        case .write:  return "Writing\(target)"
-        case .build:  return "Building…"
-        case .terminal: return "Running command…"
-        case .screenshot: return "Taking screenshot…"
-        case .artifact: return "Creating artifact…"
+    private var traceList: some View {
+        VStack(alignment: .leading, spacing: StudioSpacing.xxsPlus) {
+            ForEach(sortedTraces, id: \.id) { trace in
+                traceRow(trace)
+            }
         }
     }
 
-    private func traceTarget(_ trace: ToolTrace) -> String {
-        if let file = trace.filePath {
-            return " \(URL(fileURLWithPath: file).lastPathComponent)"
+    private func traceRow(_ trace: ToolTrace) -> some View {
+        HStack(spacing: StudioSpacing.sm) {
+            Image(systemName: traceLeadingIcon(trace))
+                .font(.system(size: trace.isLive && !isWebTrace(trace) ? 7 : (isWebTrace(trace) ? 10 : 8), weight: .semibold))
+                .foregroundStyle(trace.isLive ? StudioAccentColor.primary : StudioTextColor.tertiary)
+                .frame(width: 12)
+
+            Text(trace.title)
+                .font(StudioTypography.footnoteMedium)
+                .foregroundStyle(trace.isLive ? StudioTextColor.secondary : StudioTextColor.tertiary)
+                .lineLimit(1)
+
+            if let stats = traceDiffStats(trace) {
+                HStack(spacing: StudioSpacing.xs) {
+                    Text("+\(stats.added)")
+                        .foregroundStyle(.green.opacity(0.8))
+                    if stats.removed > 0 {
+                        Text("-\(stats.removed)")
+                            .foregroundStyle(.red.opacity(0.7))
+                    }
+                }
+                .font(StudioTypography.badgeSmallMono)
+            }
+
+            Spacer(minLength: 0)
         }
-        if let intent = trace.intent, !intent.isEmpty {
-            return " \(intent)"
-        }
-        return "…"
+        .padding(.vertical, StudioSpacing.xxs)
+        .shimmer(isActive: trace.isLive)
     }
 
-    /// Secondary description shown beneath the trace label in the expanded list.
-    /// Shows the intent when it differs from the target already shown in the label.
-    private func traceDescription(_ trace: ToolTrace) -> String? {
-        // Web searches already show query in the label — use detail if available.
-        if trace.sourceName == "web_search" || trace.sourceName == "web_fetch" {
-            return trace.detail
-        }
-
-        // If we have both a file path and an intent, show the intent as description.
-        if trace.filePath != nil, let intent = trace.intent, !intent.isEmpty {
-            return intent
-        }
-
-        // If we have detail, show it.
-        if let detail = trace.detail, !detail.isEmpty {
-            let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.count > 80 ? String(trimmed.prefix(77)) + "…" : trimmed
-        }
-
-        return nil
+    private func isWebTrace(_ trace: ToolTrace) -> Bool {
+        trace.sourceName == "web_search" || trace.sourceName == "web_fetch"
     }
 
-    private func traceLabel(_ trace: ToolTrace) -> String {
-        if trace.sourceName == "web_search" {
-            let query = webQuery(trace)
-            return trace.isLive ? "Searching web — \(query)" : "Searched web — \(query)"
+    private func traceLeadingIcon(_ trace: ToolTrace) -> String {
+        if trace.isLive {
+            return isWebTrace(trace) ? "globe" : "circle.fill"
         }
-        if trace.sourceName == "web_fetch" {
-            let url = webQuery(trace)
-            return trace.isLive ? "Fetching — \(url)" : "Fetched — \(url)"
-        }
-        let verb: String
-        switch trace.kind {
-        case .search: verb = trace.isLive ? "Searching" : "Searched"
-        case .read:   verb = trace.isLive ? "Reading" : "Read"
-        case .edit:   verb = trace.isLive ? "Editing" : "Edited"
-        case .write:  verb = trace.isLive ? "Writing" : "Wrote"
-        case .build:  verb = trace.isLive ? "Building" : "Built"
-        case .terminal: verb = trace.isLive ? "Running" : "Ran"
-        case .screenshot: verb = trace.isLive ? "Capturing" : "Captured"
-        case .artifact: verb = trace.isLive ? "Creating" : "Created"
-        }
-        return "\(verb)\(traceTarget(trace))"
-    }
-
-    private func traceIcon(_ trace: ToolTrace) -> String {
-        if trace.sourceName == "web_search" || trace.sourceName == "web_fetch" {
-            return "globe"
-        }
+        if isWebTrace(trace) { return "globe" }
         switch trace.kind {
         case .search: return "magnifyingglass"
         case .read:   return "doc.text"
@@ -932,206 +841,13 @@ private struct InlineToolTraceGroup: View {
         }
     }
 
-    private func webQuery(_ trace: ToolTrace) -> String {
-        // title is pre-formatted as "Searching <query>" or "Fetching <url>"
-        let title = trace.title
-        if let range = title.range(of: " ", options: .literal) {
-            let remainder = String(title[range.upperBound...])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !remainder.isEmpty { return remainder }
-        }
-        return trace.intent ?? "the web"
-    }
-
-    private func verbPastTense(_ kind: ToolTrace.Kind) -> String {
-        switch kind {
-        case .search: return "Searched"
-        case .read:   return "Read"
-        case .edit:   return "Edited"
-        case .write:  return "Wrote"
-        case .build:  return "Built"
-        case .terminal: return "Ran"
-        case .screenshot: return "Captured"
-        case .artifact: return "Created"
-        }
-    }
-
-    private func nounForKind(_ kind: ToolTrace.Kind, count: Int) -> String {
-        switch kind {
-        case .search, .read, .edit, .write:
-            return count == 1 ? "file" : "files"
-        case .build:
-            return count == 1 ? "target" : "targets"
-        case .terminal:
-            return count == 1 ? "command" : "commands"
-        case .screenshot:
-            return count == 1 ? "screenshot" : "screenshots"
-        case .artifact:
-            return count == 1 ? "artifact" : "artifacts"
-        }
-    }
-}
-
-private struct HistoricalTracePillStack: View {
-
-    let traces: [ToolTrace]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: StudioSpacing.sm) {
-            ForEach(traces, id: \.id) { trace in
-                HistoricalTracePill(trace: trace)
-            }
-        }
-        .padding(.top, StudioSpacing.xxs)
-        .padding(.bottom, StudioSpacing.xs)
-    }
-}
-
-private struct HistoricalTracePill: View {
-
-    let trace: ToolTrace
-
-    @Environment(\.viewportActionContext) private var viewportActions
-
-    var body: some View {
-        Group {
-            if let filePath = trace.filePath, trace.isFileLedgerTrace {
-                Button {
-                    viewportActions.showFilePreview(filePath)
-                } label: {
-                    pillContent
-                }
-                .buttonStyle(.plain)
-            } else {
-                pillContent
-            }
-        }
-    }
-
-    private var pillContent: some View {
-        HStack(spacing: StudioSpacing.md) {
-            Image(systemName: leadingSymbol)
-                .font(StudioTypography.captionSemibold)
-                .foregroundStyle(accentColor)
-
-            Text(primaryLabel)
-                .font(StudioTypography.footnote)
-                .foregroundStyle(StudioTextColor.secondary)
-                .lineLimit(1)
-
-            if let countLabel {
-                Text(countLabel)
-                    .font(StudioTypography.footnoteSemibold)
-                    .foregroundStyle(countColor)
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 0)
-
-            if trace.isFileLedgerTrace {
-                Image(systemName: "arrow.up.forward.app")
-                    .font(StudioTypography.badge)
-                    .foregroundStyle(StudioTextColor.tertiary.opacity(0.7))
-            }
-        }
-        .padding(.horizontal, StudioSpacing.xl)
-        .padding(.vertical, 7)
-        .background(backgroundShape)
-        .overlay(borderShape)
-    }
-
-    private var leadingSymbol: String {
-        switch trace.status {
-        case .success:
-            return trace.isConsoleTrace ? "terminal" : "checkmark.circle.fill"
-        case .error:
-            return trace.isConsoleTrace ? "exclamationmark.triangle.fill" : "xmark.circle.fill"
-        case .running:
-            return trace.isConsoleTrace ? "terminal" : "circle.fill"
-        }
-    }
-
-    private var primaryLabel: String {
-        if trace.isFileLedgerTrace {
-            let name = URL(fileURLWithPath: trace.filePath ?? trace.title).lastPathComponent
-            switch trace.sourceName {
-            case "file_patch":
-                return trace.status == .error ? "Patch failed for \(name)" : "Updated \(name)"
-            case "file_write":
-                return trace.status == .error ? "Write failed for \(name)" : "Wrote \(name)"
-            default:
-                return trace.status == .error ? "Read failed for \(name)" : "Read \(name)"
-            }
-        }
-
-        let cleaned = trace.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !cleaned.isEmpty {
-            return cleaned
-        }
-        return trace.kind == .build ? "Build step" : "Command"
-    }
-
-    private var countLabel: String? {
-        guard trace.isFileLedgerTrace else { return nil }
+    private func traceDiffStats(_ trace: ToolTrace) -> (added: Int, removed: Int)? {
         let added = trace.linesAdded ?? 0
         let removed = trace.linesRemoved ?? 0
         guard added > 0 || removed > 0 else { return nil }
-
-        if removed > 0 {
-            return "+\(added) -\(removed)"
-        }
-        return "+\(added)"
+        return (added, removed)
     }
 
-    private var accentColor: Color {
-        switch trace.status {
-        case .success:
-            return trace.isFileLedgerTrace ? StudioColorTokens.Syntax.diffAddition : Color.white.opacity(0.72)
-        case .error:
-            return StudioStatusColor.danger
-        case .running:
-            return StudioAccentColor.primary
-        }
-    }
-
-    private var countColor: Color {
-        trace.status == .error ? StudioStatusColor.danger : StudioColorTokens.Syntax.diffAddition
-    }
-
-    private var backgroundShape: some View {
-        Capsule(style: .continuous)
-            .fill(backgroundColor)
-    }
-
-    private var borderShape: some View {
-        Capsule(style: .continuous)
-            .stroke(borderColor, lineWidth: 0.5)
-    }
-
-    private var backgroundColor: Color {
-        if trace.isFileLedgerTrace {
-            return trace.status == .error
-                ? StudioStatusColor.danger.opacity(0.10)
-                : StudioColorTokens.Syntax.diffAddition.opacity(0.08)
-        }
-        return Color(hex: "#0B0D10")
-    }
-
-    private var borderColor: Color {
-        if trace.isFileLedgerTrace {
-            return trace.status == .error
-                ? StudioStatusColor.danger.opacity(0.70)
-                : StudioColorTokens.Syntax.diffAddition.opacity(0.28)
-        }
-        switch trace.status {
-        case .success:
-            return Color.white.opacity(0.10)
-        case .error:
-            return StudioStatusColor.danger.opacity(0.72)
-        case .running:
-            return StudioAccentColor.primary.opacity(0.40)
-        }
-    }
 }
 
 struct UserGoalBubbleView: View, Equatable {

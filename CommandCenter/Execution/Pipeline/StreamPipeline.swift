@@ -648,10 +648,14 @@ struct SemanticEventTransformer {
             )
 
         case "web_search":
+            let query = (input?["query"] as? String)
+                ?? (input?["queries"] as? [String])?.joined(separator: " | ")
+                ?? displayCommand
+                ?? "the web"
             return ToolPresentation(
                 kind: .search,
                 title: status == .completed ? "Searched web" : "Searching web",
-                target: truncate((input?["query"] as? String) ?? displayCommand ?? "the web", limit: 88),
+                target: truncate(query, limit: 88),
                 preview: previewLine ?? summarize(result)
             )
 

@@ -462,14 +462,14 @@ extension ConversationTurn {
 
         let isSettled = state == .completed || state == .failed || isHistorical
 
-        // Live turns keep console activity in the separate execution tracker.
-        // Settled turns preserve file mutations and terminal/build steps inline as history pills.
+        // Live turns keep console activity in the separate StreamStepTracker.
+        // Settled turns show every non-delegation trace inline — searches, reads,
+        // edits, builds, everything. Nothing is gated out of history.
         let inlineTraces = toolTraces
             .filter {
-                if isSettled {
-                    return $0.isHistoricalInlineTrace
-                }
-                return !$0.isConsoleTrace && !$0.isDelegationTrace
+                guard !$0.isDelegationTrace else { return false }
+                if isSettled { return true }
+                return !$0.isConsoleTrace
             }
             .sorted { ($0.textOffset, $0.eventSequence, $0.timestamp) < ($1.textOffset, $1.eventSequence, $1.timestamp) }
 
@@ -486,7 +486,10 @@ extension ConversationTurn {
             if !fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 blocks.append(.text(id: "text-full", text: fullText))
             }
-            blocks.append(.toolActivity(id: "tools-all", traces: inlineTraces))
+            // Emit each trace individually — flat lines, no grouping.
+            for (i, trace) in inlineTraces.enumerated() {
+                blocks.append(.toolActivity(id: "tools-\(i)", traces: [trace]))
+            }
             let delegations = toolTraces.filter(\.isDelegationTrace)
             if !delegations.isEmpty && !isSettled {
                 blocks.append(.toolActivity(id: "tools-delegation", traces: delegations))
@@ -530,15 +533,17 @@ extension ConversationTurn {
                 cursor = targetIndex
             }
 
-            // Collect all traces at the same offset.
-            var group: [ToolTrace] = [trace]
+            // Emit each trace as its own block — flat, not grouped.
+            blocks.append(.toolActivity(id: "tools-\(blockIndex)", traces: [trace]))
+            blockIndex += 1
+
+            // Advance past any other traces at the same offset, emitting each individually.
             while traceIndex + 1 < inlineTraces.count
                     && inlineTraces[traceIndex + 1].textOffset == trace.textOffset {
                 traceIndex += 1
-                group.append(inlineTraces[traceIndex])
+                blocks.append(.toolActivity(id: "tools-\(blockIndex)", traces: [inlineTraces[traceIndex]]))
+                blockIndex += 1
             }
-            blocks.append(.toolActivity(id: "tools-\(blockIndex)", traces: group))
-            blockIndex += 1
             traceIndex += 1
         }
 
@@ -1103,8 +1108,25 @@ final class ConversationStore: ObservableObject {
             return titledFileAction(verb: "Patching", path: tracePath(from: input, displayCommand: displayCommand), fallback: "file")
         case "list_files":
             return "Inspecting \(tracePath(from: input, displayCommand: displayCommand) ?? ".")"
+        case "grep_search":
+            let query = truncate((input?["query"] as? String) ?? (input?["pattern"] as? String) ?? "pattern", limit: 56)
+            if let file = input?["includePattern"] as? String, !file.isEmpty {
+                return "Searching \(URL(fileURLWithPath: file).lastPathComponent) for \(query)"
+            }
+            return "Searching for \(query)"
+        case "semantic_search":
+            return "Searching \(truncate((input?["query"] as? String) ?? "codebase", limit: 64))"
+        case "file_search":
+            return "Finding \(truncate((input?["query"] as? String) ?? (input?["pattern"] as? String) ?? "files", limit: 64))"
+        case "find_symbol":
+            return "Finding symbol \(truncate((input?["symbol"] as? String) ?? (input?["name"] as? String) ?? "definition", limit: 56))"
+        case "find_usages":
+            return "Finding usages of \(truncate((input?["symbol"] as? String) ?? (input?["name"] as? String) ?? "symbol", limit: 56))"
         case "web_search":
-            return "Searching \(truncate((input?["query"] as? String) ?? "the web", limit: 64))"
+            let query = (input?["query"] as? String)
+                ?? (input?["queries"] as? [String])?.joined(separator: " | ")
+                ?? "the web"
+            return "Searching \(truncate(query, limit: 64))"
         case "web_fetch":
             return "Fetching \(truncate((input?["url"] as? String) ?? "resource", limit: 64))"
         default:
@@ -1136,7 +1158,7 @@ final class ConversationStore: ObservableObject {
             return .read
         case "delegate_to_worktree":
             return .artifact
-        case "web_search", "list_files":
+        case "web_search", "list_files", "grep_search", "semantic_search", "file_search", "find_symbol", "find_usages":
             return .search
         case "web_fetch", "file_read":
             return .read
@@ -1447,6 +1469,30 @@ final class ConversationStore: ObservableObject {
         case "web_search":
             if let query = input?["query"] as? String {
                 return truncate(query, limit: 60)
+            }
+            if let queries = input?["queries"] as? [String], !queries.isEmpty {
+                return truncate(queries.joined(separator: " | "), limit: 60)
+            }
+            return nil
+
+        case "grep_search":
+            return truncate((input?["query"] as? String) ?? (input?["pattern"] as? String) ?? "", limit: 60)
+
+        case "semantic_search":
+            if let query = input?["query"] as? String {
+                return truncate(query, limit: 60)
+            }
+            return nil
+
+        case "file_search":
+            if let query = input?["query"] as? String ?? input?["pattern"] as? String {
+                return truncate(query, limit: 60)
+            }
+            return nil
+
+        case "find_symbol", "find_usages":
+            if let symbol = input?["symbol"] as? String ?? input?["name"] as? String {
+                return truncate(symbol, limit: 60)
             }
             return nil
 
